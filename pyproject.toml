@@ -1,0 +1,15 @@
+[project]
+name = "urban-ml"
+version = "0.1.0"
+description = "ML platform for urban intelligence."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "mypy>=2.1.0",
+    "pre-commit>=4.6.0",
+    "pytest>=9.1.1",
+    "ruff>=0.15.20",
+]
