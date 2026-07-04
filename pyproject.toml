@@ -1,15 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "urban-ml"
 version = "0.1.0"
 description = "ML platform for urban intelligence."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "fastapi>=0.139.0",
+    "uvicorn>=0.50.0",
+]
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.5.0",
     "mypy>=2.1.0",
     "pre-commit>=4.6.0",
     "pytest>=9.1.1",
     "ruff>=0.15.20",
 ]
+
+[tool.setuptools.packages.find]
+where = ["src"]
