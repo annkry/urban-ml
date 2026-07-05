@@ -38,12 +38,6 @@ Run the application:
 make run
 ```
 
-Install the Git hooks (run once):
-
-```bash
-uv run pre-commit install
-```
-
 Run all pre-commit hooks manually:
 
 ```bash
