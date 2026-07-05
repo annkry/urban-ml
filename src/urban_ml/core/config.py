@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    log_level: str = "INFO"
 
     model_config = SettingsConfigDict(
         env_file=".env",
