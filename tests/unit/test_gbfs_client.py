@@ -1,0 +1,151 @@
+import pytest
+
+from urban_ml.ingestion.gbfs_client import (
+    GbfsClient,
+    GbfsFeedNotFoundError,
+    GbfsValidationError,
+)
+
+
+DISCOVERY_URL = "https://example.com/gbfs/3/gbfs"
+STATION_INFORMATION_URL = "https://example.com/gbfs/3/station_information"
+STATION_STATUS_URL = "https://example.com/gbfs/3/station_status"
+
+
+def test_fetch_station_feeds_discovers_urls_and_validates_payloads() -> None:
+    payloads = {
+        DISCOVERY_URL: {
+            "last_updated": "2023-07-17T13:34:13+02:00",
+            "ttl": 0,
+            "version": "3.0",
+            "data": {
+                "feeds": [
+                    {
+                        "name": "station_information",
+                        "url": STATION_INFORMATION_URL,
+                    },
+                    {
+                        "name": "station_status",
+                        "url": STATION_STATUS_URL,
+                    },
+                ]
+            },
+        },
+        STATION_INFORMATION_URL: {
+            "last_updated": "2023-07-17T13:34:13+02:00",
+            "ttl": 60,
+            "version": "3.0",
+            "data": {
+                "stations": [
+                    {
+                        "station_id": "station-1",
+                        "name": [{"text": "Main Station", "language": "en"}],
+                        "lat": 47.3769,
+                        "lon": 8.5417,
+                        "capacity": 20,
+                    }
+                ]
+            },
+        },
+        STATION_STATUS_URL: {
+            "last_updated": "2023-07-17T13:34:13+02:00",
+            "ttl": 60,
+            "version": "3.0",
+            "data": {
+                "stations": [
+                    {
+                        "station_id": "station-1",
+                        "num_vehicles_available": 7,
+                        "num_docks_available": 13,
+                        "is_installed": True,
+                        "is_renting": True,
+                        "is_returning": True,
+                        "last_reported": "2023-07-17T13:34:13+02:00",
+                    }
+                ]
+            },
+        },
+    }
+
+    requested_urls = []
+
+    def fake_fetcher(url: str, timeout_seconds: float) -> dict:
+        requested_urls.append(url)
+        return payloads[url]
+
+    client = GbfsClient(DISCOVERY_URL, json_fetcher=fake_fetcher)
+
+    feeds = client.fetch_station_feeds()
+
+    assert requested_urls == [
+        DISCOVERY_URL,
+        STATION_INFORMATION_URL,
+        STATION_STATUS_URL,
+    ]
+    assert feeds.station_information.data.stations[0].station_id == "station-1"
+    assert feeds.station_status.data.stations[0].num_vehicles_available == 7
+
+
+def test_fetch_station_status_raises_when_feed_is_not_discovered() -> None:
+    def fake_fetcher(url: str, timeout_seconds: float) -> dict:
+        return {
+            "last_updated": "2023-07-17T13:34:13+02:00",
+            "ttl": 0,
+            "version": "3.0",
+            "data": {
+                "feeds": [
+                    {
+                        "name": "station_information",
+                        "url": STATION_INFORMATION_URL,
+                    }
+                ]
+            },
+        }
+
+    client = GbfsClient(DISCOVERY_URL, json_fetcher=fake_fetcher)
+
+    with pytest.raises(GbfsFeedNotFoundError):
+        client.fetch_station_status()
+
+
+def test_fetch_station_status_wraps_validation_errors() -> None:
+    payloads = {
+        DISCOVERY_URL: {
+            "last_updated": "2023-07-17T13:34:13+02:00",
+            "ttl": 0,
+            "version": "3.0",
+            "data": {
+                "feeds": [
+                    {
+                        "name": "station_status",
+                        "url": STATION_STATUS_URL,
+                    }
+                ]
+            },
+        },
+        STATION_STATUS_URL: {
+            "last_updated": "2023-07-17T13:34:13+02:00",
+            "ttl": 60,
+            "version": "3.0",
+            "data": {
+                "stations": [
+                    {
+                        "station_id": "station-1",
+                        "num_vehicles_available": -1,
+                        "is_installed": True,
+                        "is_renting": True,
+                        "is_returning": True,
+                        "last_reported": "2023-07-17T13:34:13+02:00",
+                    }
+                ]
+            },
+        },
+    }
+
+    def fake_fetcher(url: str, timeout_seconds: float) -> dict:
+        return payloads[url]
+
+    client = GbfsClient(DISCOVERY_URL, json_fetcher=fake_fetcher)
+
+    with pytest.raises(GbfsValidationError):
+        client.fetch_station_status()

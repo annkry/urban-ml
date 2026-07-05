@@ -1,0 +1,189 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+from pydantic import ValidationError
+
+from urban_ml.schemas.gbfs import (
+    FeedName,
+    GbfsDiscoveryResponse,
+    StationInformationResponse,
+    StationStatusResponse,
+)
+
+JsonObject = dict[str, Any]
+JsonFetcher = Callable[[str, float], JsonObject]
+
+
+class GbfsClientError(Exception):
+    """Base exception for GBFS client failures."""
+
+
+class GbfsFetchError(GbfsClientError):
+    """Raised when a GBFS feed cannot be fetched or decoded."""
+
+
+class GbfsFeedNotFoundError(GbfsClientError):
+    """Raised when a required feed is missing from gbfs.json."""
+
+
+class GbfsValidationError(GbfsClientError):
+    """Raised when a GBFS response does not match the expected schema."""
+
+
+@dataclass(frozen=True)
+class GbfsStationFeeds:
+    station_information: StationInformationResponse
+    station_status: StationStatusResponse
+
+
+@dataclass(frozen=True)
+class GbfsRawStationFeeds:
+    discovery_url: str
+    station_information_url: str
+    station_status_url: str
+    discovery_payload: JsonObject
+    station_information_payload: JsonObject
+    station_status_payload: JsonObject
+    discovery: GbfsDiscoveryResponse
+    station_information: StationInformationResponse
+    station_status: StationStatusResponse
+
+
+def fetch_json(url: str, timeout_seconds: float) -> JsonObject:
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "urban-ml-platform/0.1",
+        },
+    )
+
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            payload = json.load(response)
+    except HTTPError as exc:
+        raise GbfsFetchError(
+            f"GBFS request failed with HTTP {exc.code}: {url}"
+        ) from exc
+    except URLError as exc:
+        raise GbfsFetchError(f"GBFS request failed: {url}") from exc
+    except json.JSONDecodeError as exc:
+        raise GbfsFetchError(f"GBFS response was not valid JSON: {url}") from exc
+
+    if not isinstance(payload, dict):
+        raise GbfsFetchError(f"GBFS response must be a JSON object: {url}")
+
+    return payload
+
+
+class GbfsClient:
+    def __init__(
+        self,
+        discovery_url: str,
+        *,
+        timeout_seconds: float = 10.0,
+        json_fetcher: JsonFetcher = fetch_json,
+    ) -> None:
+        self.discovery_url = discovery_url
+        self.timeout_seconds = timeout_seconds
+        self._json_fetcher = json_fetcher
+
+    def fetch_discovery(self) -> GbfsDiscoveryResponse:
+        payload = self._fetch(self.discovery_url)
+        return self._validate(GbfsDiscoveryResponse, payload, self.discovery_url)
+
+    def get_feed_url(
+        self,
+        feed_name: FeedName,
+        discovery: GbfsDiscoveryResponse | None = None,
+    ) -> str:
+        discovery = discovery or self.fetch_discovery()
+
+        for feed in discovery.data.feeds:
+            if feed.name == feed_name:
+                return str(feed.url)
+
+        raise GbfsFeedNotFoundError(
+            f"GBFS discovery feed does not include {feed_name.value!r}"
+        )
+
+    def fetch_station_information(
+        self,
+        discovery: GbfsDiscoveryResponse | None = None,
+    ) -> StationInformationResponse:
+        url = self.get_feed_url(FeedName.STATION_INFORMATION, discovery)
+        payload = self._fetch(url)
+        return self._validate(StationInformationResponse, payload, url)
+
+    def fetch_station_status(
+        self,
+        discovery: GbfsDiscoveryResponse | None = None,
+    ) -> StationStatusResponse:
+        url = self.get_feed_url(FeedName.STATION_STATUS, discovery)
+        payload = self._fetch(url)
+        return self._validate(StationStatusResponse, payload, url)
+
+    def fetch_station_feeds(self) -> GbfsStationFeeds:
+        raw_feeds = self.fetch_raw_station_feeds()
+        return GbfsStationFeeds(
+            station_information=raw_feeds.station_information,
+            station_status=raw_feeds.station_status,
+        )
+
+    def fetch_raw_station_feeds(self) -> GbfsRawStationFeeds:
+        discovery_payload = self._fetch(self.discovery_url)
+        discovery = self._validate(
+            GbfsDiscoveryResponse,
+            discovery_payload,
+            self.discovery_url,
+        )
+
+        station_information_url = self.get_feed_url(
+            FeedName.STATION_INFORMATION,
+            discovery,
+        )
+        station_status_url = self.get_feed_url(FeedName.STATION_STATUS, discovery)
+
+        station_information_payload = self._fetch(station_information_url)
+        station_status_payload = self._fetch(station_status_url)
+
+        station_information = self._validate(
+            StationInformationResponse,
+            station_information_payload,
+            station_information_url,
+        )
+        station_status = self._validate(
+            StationStatusResponse,
+            station_status_payload,
+            station_status_url,
+        )
+
+        return GbfsRawStationFeeds(
+            discovery_url=self.discovery_url,
+            station_information_url=station_information_url,
+            station_status_url=station_status_url,
+            discovery_payload=discovery_payload,
+            station_information_payload=station_information_payload,
+            station_status_payload=station_status_payload,
+            discovery=discovery,
+            station_information=station_information,
+            station_status=station_status,
+        )
+
+    def _fetch(self, url: str) -> JsonObject:
+        return self._json_fetcher(url, self.timeout_seconds)
+
+    @staticmethod
+    def _validate[T](model: type[T], payload: Mapping[str, Any], url: str) -> T:
+        try:
+            return model.model_validate(payload)  # type: ignore[attr-defined]
+        except ValidationError as exc:
+            raise GbfsValidationError(
+                f"GBFS response failed validation: {url}"
+            ) from exc
