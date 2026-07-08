@@ -13,9 +13,14 @@ class Settings(BaseSettings):
     gbfs_discovery_url: str = (
         "https://toronto.publicbikesystem.net/customer/gbfs/v3.0/gbfs.json"
     )
-    default_raw_gbfs_dir: Path = Path("data/raw/gbfs")
-    default_timeout_seconds: float = 10.0
+    raw_gbfs_dir: Path = Path("data/raw/gbfs")
+    timeout_seconds: float = 10.0
     system_id: str = "toronto"
+
+    # Processed GBFS storage settings
+    processed_gbfs_dir: Path = Path("data/processed/gbfs")
+    station_snapshots_filename: str = "station_snapshots.parquet"
+    station_snapshots_metadata_filename: str = "metadata.json"
 
     model_config = SettingsConfigDict(
         env_file=".env",

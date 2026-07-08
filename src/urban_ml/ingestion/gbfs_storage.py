@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +24,8 @@ def save_raw_gbfs_snapshot(
     *,
     output_dir: Path,
     system_id: str,
+    observed_at: datetime,
 ) -> RawGbfsSnapshotPaths:
-    observed_at = datetime.now(UTC)
     snapshot_dir = _unique_snapshot_dir(output_dir, system_id, observed_at)
     snapshot_dir.mkdir(parents=True, exist_ok=False)
 
