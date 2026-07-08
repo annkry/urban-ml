@@ -13,6 +13,8 @@ def test_format_ingestion_summary_includes_counts() -> None:
         status_count=3,
         matched_station_status_count=2,
         raw_snapshot_dir="/tmp/gbfs_snapshot_2023-07-17T13:34:13+02:00",
+        processed_snapshot_dir="/tmp/gbfs_processed_2023-07-17T13:35:13+02:00",
+        processed_station_snapshot_count=2,
     )
 
     formatted = format_ingestion_summary(summary)
