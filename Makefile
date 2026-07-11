@@ -27,5 +27,8 @@ check-unused-vars:
 check-unused-code:
 	uv run vulture src scripts tests --min-confidence 80
 
+ingest-gbfs:
+	uv run python scripts/ingest_gbfs.py
+
 run:
 	uv run uvicorn urban_ml.api.main:app --reload
