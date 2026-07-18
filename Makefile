@@ -30,5 +30,11 @@ check-unused-code:
 ingest-gbfs:
 	uv run python scripts/ingest_gbfs.py
 
+db-upgrade:
+	uv run alembic upgrade head
+
+db-revision:
+	uv run alembic revision --autogenerate -m "$(name)"
+
 run:
 	uv run uvicorn urban_ml.api.main:app --reload

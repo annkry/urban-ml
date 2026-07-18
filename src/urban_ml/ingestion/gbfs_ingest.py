@@ -4,15 +4,27 @@ import argparse
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+
+from sqlalchemy.orm import Session
 
 from urban_ml.core.config import settings
-from urban_ml.ingestion.gbfs_client import GbfsClient, GbfsClientError
-from urban_ml.ingestion.gbfs_storage import save_raw_gbfs_snapshot
-from urban_ml.processing.gbfs_processed_storage import save_processed_station_snapshots
+from urban_ml.ingestion.gbfs_client import (
+    GbfsClient,
+    GbfsClientError,
+    JsonFetcher,
+    fetch_json_with_retry,
+)
 from urban_ml.processing.gbfs_transform import (
     GbfsTransformError,
     build_station_snapshots,
+)
+from urban_ml.storage.db import get_session
+from urban_ml.storage.repository import (
+    complete_ingestion_run,
+    fail_ingestion_run,
+    save_raw_gbfs_payload,
+    save_station_snapshots,
+    start_ingestion_run,
 )
 
 
@@ -24,8 +36,6 @@ class GbfsIngestionSummary:
     station_count: int
     status_count: int
     matched_station_status_count: int
-    raw_snapshot_dir: str
-    processed_snapshot_dir: str
     processed_station_snapshot_count: int
 
 
@@ -33,48 +43,49 @@ def ingest_gbfs_station_feeds(
     discovery_url: str,
     *,
     timeout_seconds: float,
-    raw_output_dir: Path,
-    processed_output_dir: Path,
     system_id: str,
+    session: Session,
+    json_fetcher: JsonFetcher = fetch_json_with_retry,
 ) -> GbfsIngestionSummary:
-    """Fetch, validate, and persist GBFS station feeds."""
+    """Fetch, validate, and persist GBFS station feeds to the database."""
 
     observed_at = datetime.now(UTC)
+    run = start_ingestion_run(session, system_id=system_id, started_at=observed_at)
 
-    client = GbfsClient(discovery_url, timeout_seconds=timeout_seconds)
-    raw_feeds = client.fetch_raw_station_feeds()
+    try:
+        client = GbfsClient(
+            discovery_url, timeout_seconds=timeout_seconds, json_fetcher=json_fetcher
+        )
+        raw_feeds = client.fetch_raw_station_feeds()
 
-    station_ids = {
-        station.station_id for station in raw_feeds.station_information.data.stations
-    }
-    status_station_ids = {
-        station.station_id for station in raw_feeds.station_status.data.stations
-    }
+        station_ids = {
+            station.station_id
+            for station in raw_feeds.station_information.data.stations
+        }
+        status_station_ids = {
+            station.station_id for station in raw_feeds.station_status.data.stations
+        }
 
-    raw_snapshot_paths = save_raw_gbfs_snapshot(
-        raw_feeds,
-        output_dir=raw_output_dir,
-        system_id=system_id,
-        observed_at=observed_at,
-    )
-    raw_snapshot_dir = raw_snapshot_paths.snapshot_dir
-    snapshot_relative_dir = raw_snapshot_dir.relative_to(raw_output_dir)
+        save_raw_gbfs_payload(
+            session, raw_feeds, system_id=system_id, observed_at=observed_at
+        )
 
-    station_snapshots = build_station_snapshots(
-        raw_feeds,
-        system_id=system_id,
-        observed_at=observed_at,
-    )
-    processed_snapshot_paths = save_processed_station_snapshots(
-        station_snapshots,
-        output_dir=processed_output_dir,
-        system_id=system_id,
-        observed_at=observed_at,
-        source_raw_snapshot_dir=raw_snapshot_dir,
-        snapshot_relative_dir=snapshot_relative_dir,
-    )
-    processed_snapshot_dir = processed_snapshot_paths.snapshot_dir
-    processed_station_snapshot_count = len(station_snapshots)
+        station_snapshots = build_station_snapshots(
+            raw_feeds, system_id=system_id, observed_at=observed_at
+        )
+        save_station_snapshots(session, station_snapshots)
+
+        complete_ingestion_run(
+            session,
+            run,
+            finished_at=datetime.now(UTC),
+            row_count=len(station_snapshots),
+        )
+    except (GbfsClientError, GbfsTransformError) as exc:
+        fail_ingestion_run(
+            session, run, finished_at=datetime.now(UTC), error_message=str(exc)
+        )
+        raise
 
     return GbfsIngestionSummary(
         discovery_url=discovery_url,
@@ -83,9 +94,7 @@ def ingest_gbfs_station_feeds(
         station_count=len(station_ids),
         status_count=len(status_station_ids),
         matched_station_status_count=len(station_ids & status_station_ids),
-        raw_snapshot_dir=str(raw_snapshot_dir),
-        processed_snapshot_dir=str(processed_snapshot_dir),
-        processed_station_snapshot_count=processed_station_snapshot_count,
+        processed_station_snapshot_count=len(station_snapshots),
     )
 
 
@@ -98,8 +107,6 @@ def format_ingestion_summary(summary: GbfsIngestionSummary) -> str:
         f"Stations discovered: {summary.station_count}",
         f"Station statuses discovered: {summary.status_count}",
         f"Stations with matching status: {summary.matched_station_status_count}",
-        f"Raw snapshot saved: {summary.raw_snapshot_dir}",
-        f"Processed snapshot saved: {summary.processed_snapshot_dir}",
         f"Processed station snapshots: {summary.processed_station_snapshot_count}",
     ]
 
@@ -127,19 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--system-id",
         default=settings.system_id,
-        help="System identifier used in raw and processed snapshot paths.",
-    )
-    parser.add_argument(
-        "--raw-output-dir",
-        type=Path,
-        default=settings.raw_gbfs_dir,
-        help="Directory where raw GBFS snapshots will be saved.",
-    )
-    parser.add_argument(
-        "--processed-output-dir",
-        type=Path,
-        default=settings.processed_gbfs_dir,
-        help="Directory where processed GBFS snapshots will be saved.",
+        help="System identifier used to tag stored rows.",
     )
     return parser
 
@@ -149,13 +144,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        summary = ingest_gbfs_station_feeds(
-            args.discovery_url,
-            timeout_seconds=args.timeout_seconds,
-            raw_output_dir=args.raw_output_dir,
-            processed_output_dir=args.processed_output_dir,
-            system_id=args.system_id,
-        )
+        with get_session() as session:
+            summary = ingest_gbfs_station_feeds(
+                args.discovery_url,
+                timeout_seconds=args.timeout_seconds,
+                system_id=args.system_id,
+                session=session,
+            )
     except (GbfsClientError, GbfsTransformError, RuntimeError, ValueError) as exc:
         parser.exit(status=1, message=f"GBFS ingestion failed: {exc}\n")
 

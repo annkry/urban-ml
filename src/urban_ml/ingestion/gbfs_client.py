@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -82,13 +83,47 @@ def fetch_json(url: str, timeout_seconds: float) -> JsonObject:
     return payload
 
 
+@dataclass(frozen=True)
+class RetryPolicy:
+    max_attempts: int = 3
+    initial_backoff_seconds: float = 1.0
+    backoff_multiplier: float = 2.0
+
+
+def fetch_json_with_retry(
+    url: str,
+    timeout_seconds: float,
+    *,
+    fetcher: JsonFetcher = fetch_json,
+    retry_policy: RetryPolicy = RetryPolicy(),
+    sleep: Callable[[float], None] = time.sleep,
+) -> JsonObject:
+    """Fetch JSON, retrying transient failures with exponential backoff."""
+
+    delay = retry_policy.initial_backoff_seconds
+    last_error: GbfsFetchError | None = None
+
+    for attempt in range(1, retry_policy.max_attempts + 1):
+        try:
+            return fetcher(url, timeout_seconds)
+        except GbfsFetchError as exc:
+            last_error = exc
+            if attempt == retry_policy.max_attempts:
+                break
+            sleep(delay)
+            delay *= retry_policy.backoff_multiplier
+
+    assert last_error is not None
+    raise last_error
+
+
 class GbfsClient:
     def __init__(
         self,
         discovery_url: str,
         *,
         timeout_seconds: float = 10.0,
-        json_fetcher: JsonFetcher = fetch_json,
+        json_fetcher: JsonFetcher = fetch_json_with_retry,
     ) -> None:
         self.discovery_url = discovery_url
         self.timeout_seconds = timeout_seconds

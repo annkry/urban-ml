@@ -3,7 +3,10 @@ import pytest
 from urban_ml.ingestion.gbfs_client import (
     GbfsClient,
     GbfsFeedNotFoundError,
+    GbfsFetchError,
     GbfsValidationError,
+    RetryPolicy,
+    fetch_json_with_retry,
 )
 
 
@@ -149,3 +152,64 @@ def test_fetch_station_status_wraps_validation_errors() -> None:
 
     with pytest.raises(GbfsValidationError):
         client.fetch_station_status()
+
+
+def test_fetch_json_with_retry_succeeds_after_transient_failures() -> None:
+    attempts = []
+    sleeps: list[float] = []
+
+    def flaky_fetcher(url: str, timeout_seconds: float) -> dict:
+        attempts.append(url)
+        if len(attempts) < 3:
+            raise GbfsFetchError("transient failure")
+        return {"ok": True}
+
+    result = fetch_json_with_retry(
+        DISCOVERY_URL,
+        10.0,
+        fetcher=flaky_fetcher,
+        retry_policy=RetryPolicy(max_attempts=3, initial_backoff_seconds=0.1),
+        sleep=sleeps.append,
+    )
+
+    assert result == {"ok": True}
+    assert len(attempts) == 3
+    assert sleeps == [0.1, 0.2]
+
+
+def test_fetch_json_with_retry_raises_last_error_after_max_attempts() -> None:
+    attempts = []
+
+    def always_fails(url: str, timeout_seconds: float) -> dict:
+        attempts.append(url)
+        raise GbfsFetchError(f"failure {len(attempts)}")
+
+    with pytest.raises(GbfsFetchError, match="failure 3"):
+        fetch_json_with_retry(
+            DISCOVERY_URL,
+            10.0,
+            fetcher=always_fails,
+            retry_policy=RetryPolicy(max_attempts=3, initial_backoff_seconds=0.0),
+            sleep=lambda _seconds: None,
+        )
+
+    assert len(attempts) == 3
+
+
+def test_fetch_json_with_retry_does_not_retry_non_fetch_errors() -> None:
+    attempts = []
+
+    def buggy_fetcher(url: str, timeout_seconds: float) -> dict:
+        attempts.append(url)
+        raise ValueError("not a retryable fetch failure")
+
+    with pytest.raises(ValueError, match="not a retryable fetch failure"):
+        fetch_json_with_retry(
+            DISCOVERY_URL,
+            10.0,
+            fetcher=buggy_fetcher,
+            retry_policy=RetryPolicy(max_attempts=3, initial_backoff_seconds=0.0),
+            sleep=lambda _seconds: None,
+        )
+
+    assert len(attempts) == 1

@@ -9,9 +9,11 @@ description = "ML platform for urban intelligence."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.13",
     "fastapi>=0.139.0",
-    "pyarrow>=24.0.0",
+    "psycopg[binary]>=3.2",
     "pydantic-settings>=2.14.2",
+    "sqlalchemy>=2.0",
     "uvicorn>=0.50.0",
 ]
 
