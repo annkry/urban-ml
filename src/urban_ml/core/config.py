@@ -13,14 +13,14 @@ class Settings(BaseSettings):
         "https://toronto.publicbikesystem.net/customer/gbfs/v3.0/gbfs.json"
     )
     timeout_seconds: float = 10.0
-    system_id: str = "toronto"
 
     # Database settings
-    database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/urban_ml"
+    database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5433/urban_ml"
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
+        extra="ignore",
     )
 
 

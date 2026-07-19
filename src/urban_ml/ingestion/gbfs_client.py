@@ -15,6 +15,8 @@ from urban_ml.schemas.gbfs import (
     GbfsDiscoveryResponse,
     StationInformationResponse,
     StationStatusResponse,
+    SystemInformationResponse,
+    VehicleTypesResponse,
 )
 
 JsonObject = dict[str, Any]
@@ -38,20 +40,18 @@ class GbfsValidationError(GbfsClientError):
 
 
 @dataclass(frozen=True)
-class GbfsStationFeeds:
-    station_information: StationInformationResponse
-    station_status: StationStatusResponse
-
-
-@dataclass(frozen=True)
-class GbfsRawStationFeeds:
+class GbfsRawFeeds:
     discovery_url: str
+    system_information_url: str
+    vehicle_types_url: str
     station_information_url: str
     station_status_url: str
     discovery_payload: JsonObject
     station_information_payload: JsonObject
     station_status_payload: JsonObject
     discovery: GbfsDiscoveryResponse
+    system_information: SystemInformationResponse
+    vehicle_types: VehicleTypesResponse
     station_information: StationInformationResponse
     station_status: StationStatusResponse
 
@@ -129,17 +129,11 @@ class GbfsClient:
         self.timeout_seconds = timeout_seconds
         self._json_fetcher = json_fetcher
 
-    def fetch_discovery(self) -> GbfsDiscoveryResponse:
-        payload = self._fetch(self.discovery_url)
-        return self._validate(GbfsDiscoveryResponse, payload, self.discovery_url)
-
     def get_feed_url(
         self,
         feed_name: FeedName,
-        discovery: GbfsDiscoveryResponse | None = None,
+        discovery: GbfsDiscoveryResponse,
     ) -> str:
-        discovery = discovery or self.fetch_discovery()
-
         for feed in discovery.data.feeds:
             if feed.name == feed_name:
                 return str(feed.url)
@@ -148,30 +142,11 @@ class GbfsClient:
             f"GBFS discovery feed does not include {feed_name.value!r}"
         )
 
-    def fetch_station_information(
-        self,
-        discovery: GbfsDiscoveryResponse | None = None,
-    ) -> StationInformationResponse:
-        url = self.get_feed_url(FeedName.STATION_INFORMATION, discovery)
-        payload = self._fetch(url)
-        return self._validate(StationInformationResponse, payload, url)
+    def fetch_raw_feeds(self) -> GbfsRawFeeds:
+        """Fetch discovery, system_information, vehicle_types,
+        station_information, and station_status.
+        """
 
-    def fetch_station_status(
-        self,
-        discovery: GbfsDiscoveryResponse | None = None,
-    ) -> StationStatusResponse:
-        url = self.get_feed_url(FeedName.STATION_STATUS, discovery)
-        payload = self._fetch(url)
-        return self._validate(StationStatusResponse, payload, url)
-
-    def fetch_station_feeds(self) -> GbfsStationFeeds:
-        raw_feeds = self.fetch_raw_station_feeds()
-        return GbfsStationFeeds(
-            station_information=raw_feeds.station_information,
-            station_status=raw_feeds.station_status,
-        )
-
-    def fetch_raw_station_feeds(self) -> GbfsRawStationFeeds:
         discovery_payload = self._fetch(self.discovery_url)
         discovery = self._validate(
             GbfsDiscoveryResponse,
@@ -179,15 +154,32 @@ class GbfsClient:
             self.discovery_url,
         )
 
+        system_information_url = self.get_feed_url(
+            FeedName.SYSTEM_INFORMATION,
+            discovery,
+        )
+        vehicle_types_url = self.get_feed_url(FeedName.VEHICLE_TYPES, discovery)
         station_information_url = self.get_feed_url(
             FeedName.STATION_INFORMATION,
             discovery,
         )
         station_status_url = self.get_feed_url(FeedName.STATION_STATUS, discovery)
 
+        system_information_payload = self._fetch(system_information_url)
+        vehicle_types_payload = self._fetch(vehicle_types_url)
         station_information_payload = self._fetch(station_information_url)
         station_status_payload = self._fetch(station_status_url)
 
+        system_information = self._validate(
+            SystemInformationResponse,
+            system_information_payload,
+            system_information_url,
+        )
+        vehicle_types = self._validate(
+            VehicleTypesResponse,
+            vehicle_types_payload,
+            vehicle_types_url,
+        )
         station_information = self._validate(
             StationInformationResponse,
             station_information_payload,
@@ -199,14 +191,18 @@ class GbfsClient:
             station_status_url,
         )
 
-        return GbfsRawStationFeeds(
+        return GbfsRawFeeds(
             discovery_url=self.discovery_url,
+            system_information_url=system_information_url,
+            vehicle_types_url=vehicle_types_url,
             station_information_url=station_information_url,
             station_status_url=station_status_url,
             discovery_payload=discovery_payload,
             station_information_payload=station_information_payload,
             station_status_payload=station_status_payload,
             discovery=discovery,
+            system_information=system_information,
+            vehicle_types=vehicle_types,
             station_information=station_information,
             station_status=station_status,
         )

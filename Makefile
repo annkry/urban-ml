@@ -30,6 +30,9 @@ check-unused-code:
 ingest-gbfs:
 	uv run python scripts/ingest_gbfs.py
 
+ingest-loop:
+	uv run python scripts/ingest_loop.py
+
 db-upgrade:
 	uv run alembic upgrade head
 

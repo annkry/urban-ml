@@ -44,6 +44,27 @@ class ParkingType(StrEnum):
     UNDERGROUND_PARKING = "underground_parking"
 
 
+class FormFactor(StrEnum):
+    BICYCLE = "bicycle"
+    CARGO_BICYCLE = "cargo_bicycle"
+    CAR = "car"
+    MOPED = "moped"
+    SCOOTER_STANDING = "scooter_standing"
+    SCOOTER_SEATED = "scooter_seated"
+    OTHER = "other"
+
+
+class PropulsionType(StrEnum):
+    HUMAN = "human"
+    ELECTRIC_ASSIST = "electric_assist"
+    ELECTRIC = "electric"
+    COMBUSTION = "combustion"
+    COMBUSTION_DIESEL = "combustion_diesel"
+    HYBRID = "hybrid"
+    PLUG_IN_HYBRID = "plug_in_hybrid"
+    HYDROGEN_FUEL_CELL = "hydrogen_fuel_cell"
+
+
 class LocalizedString(GbfsModel):
     text: str
     language: str
@@ -155,3 +176,32 @@ class StationStatusResponse(GbfsModel):
     ttl: int = Field(ge=0)
     version: Literal["3.0"]
     data: StationStatusData
+
+
+class SystemInformationData(GbfsModel):
+    system_id: str
+
+
+class SystemInformationResponse(GbfsModel):
+    last_updated: datetime
+    ttl: int = Field(ge=0)
+    version: Literal["3.0"]
+    data: SystemInformationData
+
+
+class VehicleType(GbfsModel):
+    vehicle_type_id: str
+    form_factor: FormFactor
+    propulsion_type: PropulsionType
+    name: list[LocalizedString] | None = None
+
+
+class VehicleTypesData(GbfsModel):
+    vehicle_types: list[VehicleType]
+
+
+class VehicleTypesResponse(GbfsModel):
+    last_updated: datetime
+    ttl: int = Field(ge=0)
+    version: Literal["3.0"]
+    data: VehicleTypesData
