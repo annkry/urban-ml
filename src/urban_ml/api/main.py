@@ -2,18 +2,21 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
-import mlflow
 from fastapi import Depends, FastAPI, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from urban_ml.api.schemas import PredictionResponse
 from urban_ml.core.config import settings
 from urban_ml.core.logging import configure_logging, get_logger
+from urban_ml.modeling.artifacts import (
+    load_booster,
+    load_metadata,
+    load_station_id_encoding,
+    model_artifacts_exist,
+)
 from urban_ml.modeling.predict import (
     InsufficientHistoryError,
     build_feature_row,
-    load_production_model,
-    load_station_id_encoding,
     predict_one,
 )
 from urban_ml.storage.db import get_db, get_session
@@ -43,20 +46,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.app_env,
     )
 
-    mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
     with get_session() as session:
         app.state.system_id = _resolve_system_id(session)
 
-    if settings.model_run_id:
-        app.state.model = load_production_model(settings.model_run_id)
-        app.state.station_id_encoding = load_station_id_encoding(settings.model_run_id)
-        app.state.model_run_id = settings.model_run_id
-        logger.info("Loaded prediction model from run %s", settings.model_run_id)
+    model_dir = settings.model_dir
+    if model_artifacts_exist(model_dir):
+        app.state.model = load_booster(model_dir)
+        app.state.station_id_encoding = load_station_id_encoding(model_dir)
+        app.state.model_run_id = load_metadata(model_dir)["mlflow_run_id"]
+        logger.info(
+            "Loaded prediction model from %s (trained in MLflow run %s)",
+            model_dir,
+            app.state.model_run_id,
+        )
     else:
         app.state.model = None
         app.state.station_id_encoding = None
         app.state.model_run_id = None
-        logger.warning("MODEL_RUN_ID not set; /predict will return 503")
+        logger.warning(
+            "No model artifacts under %s; /predict will return 503", model_dir
+        )
 
     yield
     logger.info("Shutting down %s", settings.app_name)
@@ -86,7 +95,7 @@ def predict_station(
     if model is None:
         raise HTTPException(
             status_code=503,
-            detail="Prediction model not loaded. Set MODEL_RUN_ID and restart.",
+            detail="Prediction model not loaded.",
         )
     encoding = request.app.state.station_id_encoding
     system_id = request.app.state.system_id

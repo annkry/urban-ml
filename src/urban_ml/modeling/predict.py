@@ -2,18 +2,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import mlflow.artifacts
+import lightgbm as lgb
 import numpy as np
 import polars as pl
-from mlflow.pyfunc import PyFuncModel, load_model
 from sqlalchemy.orm import Session
 
 from urban_ml.features.build_features import compute_features
-from urban_ml.modeling.encoding import (
-    STATION_ENCODING_ARTIFACT_PATH,
-    encode_station_id,
-    to_model_frame,
-)
+from urban_ml.modeling.encoding import encode_station_id, to_model_frame
 from urban_ml.storage.models import Station
 from urban_ml.storage.repository import fetch_recent_station_status
 
@@ -22,16 +17,6 @@ LOOKBACK_MINUTES = 90
 
 class InsufficientHistoryError(Exception):
     """Not enough recent data to compute a feature row for this station."""
-
-
-def load_production_model(run_id: str) -> PyFuncModel:
-    return load_model(f"runs:/{run_id}/model")
-
-
-def load_station_id_encoding(run_id: str) -> dict[str, int]:
-    return mlflow.artifacts.load_dict(
-        f"runs:/{run_id}/{STATION_ENCODING_ARTIFACT_PATH}"
-    )
 
 
 def build_feature_row(
@@ -73,7 +58,7 @@ def build_feature_row(
 
 
 def predict_one(
-    model: PyFuncModel,
+    model: lgb.Booster,
     feature_row: pl.DataFrame,
     *,
     encoding: dict[str, int],

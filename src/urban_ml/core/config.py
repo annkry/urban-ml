@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,7 +21,7 @@ class Settings(BaseSettings):
 
     # ML / MLflow settings
     mlflow_tracking_uri: str = "sqlite:///mlflow.db"
-    model_run_id: str | None = None
+    model_dir: Path = Path("models/current")
     forecast_horizon_minutes: int = 120
     system_id: str | None = None
 
