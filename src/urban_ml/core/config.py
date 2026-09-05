@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     # Database settings
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5433/urban_ml"
 
+    # ML / MLflow settings
+    mlflow_tracking_uri: str = "sqlite:///mlflow.db"
+    model_run_id: str | None = None
+    forecast_horizon_minutes: int = 120
+    system_id: str | None = None
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
