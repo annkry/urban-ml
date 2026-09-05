@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -28,10 +28,15 @@ from urban_ml.storage.models import (
 from urban_ml.storage.repository import (
     complete_ingestion_run,
     fail_ingestion_run,
+    fetch_recent_station_status,
+    get_station,
+    list_stations,
+    list_system_ids,
     save_raw_gbfs_payload,
     save_station_status,
     save_station_vehicle_availability,
     start_ingestion_run,
+    station_status_history_query,
     upsert_stations,
     upsert_vehicle_types,
 )
@@ -282,3 +287,87 @@ def test_save_station_vehicle_availability_persists_rows(session) -> None:
     assert stored.station_id == "station-1"
     assert stored.vehicle_type_id == "CLASSIC"
     assert stored.count == 5
+
+
+def test_get_station_returns_none_when_missing(session) -> None:
+    assert get_station(session, system_id="toronto", station_id="missing") is None
+
+
+def test_get_station_returns_matching_station(session) -> None:
+    upsert_stations(session, [_station_data()])
+    session.commit()
+
+    found = get_station(session, system_id="toronto", station_id="station-1")
+    assert found is not None
+    assert found.station_name == "Main Station"
+
+
+def test_list_stations_filters_by_system_id(session) -> None:
+    upsert_stations(
+        session,
+        [
+            _station_data(station_id="station-1"),
+            _station_data(station_id="station-2"),
+            _station_data(system_id="other-system", station_id="station-3"),
+        ],
+    )
+    session.commit()
+
+    stations = list_stations(session, system_id="toronto")
+    assert {s.station_id for s in stations} == {"station-1", "station-2"}
+
+
+def test_list_system_ids_returns_distinct_values(session) -> None:
+    upsert_stations(
+        session,
+        [
+            _station_data(station_id="station-1"),
+            _station_data(station_id="station-2"),
+            _station_data(system_id="other-system", station_id="station-3"),
+        ],
+    )
+    session.commit()
+
+    assert set(list_system_ids(session)) == {"toronto", "other-system"}
+
+
+def test_fetch_recent_station_status_filters_by_station_and_since(session) -> None:
+    save_station_status(
+        session,
+        [
+            _station_status(),
+            StationStatus(
+                **{**_station_status().model_dump(), "station_id": "station-2"}
+            ),
+        ],
+    )
+    session.commit()
+
+    since = OBSERVED_AT - timedelta(minutes=1)
+    rows = fetch_recent_station_status(
+        session, system_id="toronto", station_id="station-1", since=since
+    )
+    assert len(rows) == 1
+    assert rows[0].station_id == "station-1"
+
+    too_recent = OBSERVED_AT + timedelta(minutes=1)
+    assert (
+        fetch_recent_station_status(
+            session, system_id="toronto", station_id="station-1", since=too_recent
+        )
+        == []
+    )
+
+
+def test_station_status_history_query_selects_expected_columns(session) -> None:
+    save_station_status(session, [_station_status()])
+    session.commit()
+
+    query = station_status_history_query(system_id="toronto")
+    rows = session.execute(query).all()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.station_id == "station-1"
+    assert row.num_vehicles_available == 7
+    assert row.is_renting is True

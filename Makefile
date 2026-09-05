@@ -41,3 +41,9 @@ db-revision:
 
 run:
 	uv run uvicorn urban_ml.api.main:app --reload
+
+train:
+	uv run python scripts/train_model.py
+
+mlflow-ui:
+	uv run mlflow ui --backend-store-uri sqlite:///mlflow.db

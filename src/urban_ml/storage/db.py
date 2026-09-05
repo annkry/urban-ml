@@ -21,3 +21,10 @@ def get_session() -> Iterator[Session]:
         yield session
     finally:
         session.close()
+
+
+def get_db() -> Iterator[Session]:
+    """FastAPI dependency wrapping get_session() for request-scoped sessions."""
+
+    with get_session() as session:
+        yield session
