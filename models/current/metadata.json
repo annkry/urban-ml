@@ -1,0 +1,29 @@
+{
+  "feature_columns": [
+    "station_id",
+    "capacity",
+    "num_vehicles_available",
+    "num_docks_available",
+    "occupancy_ratio",
+    "lag_5m_vehicles",
+    "lag_15m_vehicles",
+    "lag_30m_vehicles",
+    "lag_60m_vehicles",
+    "delta_15m",
+    "roll_mean_30m",
+    "roll_std_30m",
+    "roll_mean_60m",
+    "hour_sin",
+    "hour_cos",
+    "dow_sin",
+    "dow_cos"
+  ],
+  "horizon_minutes": 120,
+  "mlflow_run_id": "0500190379044dd89af3b5b8e6d1520c",
+  "n_stations": 1064,
+  "n_train_rows": 7067233,
+  "test_mae": 1.4860142616052705,
+  "test_mae_improvement_over_baseline_pct": 7.131680957741896,
+  "test_rmse": 2.6973518783570722,
+  "trained_at": "2026-09-05T17:49:09.048633+00:00"
+}

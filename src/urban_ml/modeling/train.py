@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import lightgbm as lgb
@@ -19,6 +21,7 @@ from urban_ml.features.build_features import (
     add_target,
     compute_features,
 )
+from urban_ml.modeling.artifacts import save_model_artifacts
 from urban_ml.modeling.dataset import (
     MIN_STATION_HISTORY_ROWS,
     TimeSplit,
@@ -173,7 +176,16 @@ def train_and_log_lightgbm(
     baseline_test_mae: float,
     representative_station_id: str,
     encoding: dict[str, int],
+    model_dir: Path,
 ) -> tuple[str, float, float]:
+    """Writes the serving artifacts to ``model_dir`` as a side effect.
+
+    That destination is a required argument rather than reading
+    ``settings.model_dir`` directly: this function is exercised by the
+    training smoke test, and defaulting to the configured path would have the
+    test suite silently overwrite the committed production model.
+    """
+
     X_train = to_model_frame(split.train, encoding)
     X_val = to_model_frame(split.val, encoding)
     X_test = to_model_frame(split.test, encoding)
@@ -270,6 +282,24 @@ def train_and_log_lightgbm(
             input_example=X_val.head(2),
         )
 
+        save_model_artifacts(
+            model_dir,
+            booster=model.booster_,
+            encoding=encoding,
+            metadata={
+                "mlflow_run_id": run.info.run_id,
+                "trained_at": datetime.now(UTC).isoformat(),
+                "horizon_minutes": common_params["horizon_minutes"],
+                "n_train_rows": common_params["n_train_rows"],
+                "n_stations": common_params["n_stations"],
+                "test_mae": test_mae,
+                "test_rmse": test_rmse,
+                "test_mae_improvement_over_baseline_pct": improvement_pct,
+                "feature_columns": FEATURE_COLUMNS,
+            },
+        )
+        logger.info("Wrote serving artifacts to %s", model_dir)
+
         fig = plot_predicted_vs_actual(
             y_test_abs, test_pred_abs, mae=test_mae, rmse=test_rmse, title="LightGBM"
         )
@@ -341,6 +371,7 @@ def main() -> int:
         baseline_test_mae=baseline_test_mae,
         representative_station_id=representative_station_id,
         encoding=encoding,
+        model_dir=settings.model_dir,
     )
 
     improvement_pct = (baseline_test_mae - lgbm_test_mae) / baseline_test_mae * 100
@@ -354,7 +385,7 @@ def main() -> int:
         f"({improvement_pct:.1f}% better than baseline)"
     )
     print()
-    print("To serve the LightGBM model, set in .env:")
-    print(f"MODEL_RUN_ID={lgbm_run_id}")
+    print(f"Serving artifacts written to {settings.model_dir}/ - commit them to")
+    print("deploy this model; the API loads them at startup.")
 
     return 0

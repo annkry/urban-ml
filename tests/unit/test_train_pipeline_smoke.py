@@ -56,7 +56,9 @@ def _tracking_uri(tmp_path: Path) -> str:
     return f"sqlite:///{tmp_path}/mlflow.db"
 
 
-def test_train_and_log_pipeline_round_trips_through_mlflow(_tracking_uri: str) -> None:
+def test_train_and_log_pipeline_round_trips_through_mlflow(
+    _tracking_uri: str, tmp_path: Path
+) -> None:
     raw, stations = _synthetic_raw_and_stations()
     encoding = build_station_id_encoding(stations)
 
@@ -98,6 +100,7 @@ def test_train_and_log_pipeline_round_trips_through_mlflow(_tracking_uri: str) -
         baseline_test_mae=baseline_test_mae,
         representative_station_id=STATIONS[0],
         encoding=encoding,
+        model_dir=tmp_path / "model",
     )
     assert math.isfinite(lgbm_test_mae)
     assert math.isfinite(lgbm_test_rmse)
