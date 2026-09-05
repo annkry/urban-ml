@@ -27,9 +27,9 @@ class RawGbfsPayload(Base):
     __tablename__ = "raw_gbfs_payloads"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    system_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    system_id: Mapped[str] = mapped_column(String, nullable=False)
     observed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
+        DateTime(timezone=True), nullable=False
     )
     discovery_url: Mapped[str] = mapped_column(String, nullable=False)
     system_information_url: Mapped[str] = mapped_column(String, nullable=False)
@@ -81,11 +81,11 @@ class StationVehicleAvailabilityRecord(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     observed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
+        DateTime(timezone=True), nullable=False
     )
-    system_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    station_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    vehicle_type_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    system_id: Mapped[str] = mapped_column(String, nullable=False)
+    station_id: Mapped[str] = mapped_column(String, nullable=False)
+    vehicle_type_id: Mapped[str] = mapped_column(String, nullable=False)
     count: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
@@ -106,8 +106,8 @@ class StationStatusRecord(Base):
     observed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
     )
-    system_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    station_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    system_id: Mapped[str] = mapped_column(String, nullable=False)
+    station_id: Mapped[str] = mapped_column(String, nullable=False)
     num_vehicles_available: Mapped[int] = mapped_column(Integer, nullable=False)
     num_docks_available: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_installed: Mapped[bool] = mapped_column(nullable=False)
@@ -124,7 +124,7 @@ class IngestionRun(Base):
     __tablename__ = "ingestion_runs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    system_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    system_id: Mapped[str | None] = mapped_column(String, nullable=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
