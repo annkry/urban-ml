@@ -5,21 +5,12 @@ from pathlib import Path
 from typing import Literal
 
 import polars as pl
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.engine import Engine
 
-from urban_ml.archive.layout import (
-    STATION_STATUS,
-    STATION_VEHICLE_AVAILABILITY,
-    catalog_path,
-    partition_path,
-)
+from urban_ml.archive.layout import STATION_STATUS, STATIONS, partition_path
 from urban_ml.core.logging import get_logger
-from urban_ml.storage.models import (
-    Station,
-    StationStatusRecord,
-    StationVehicleAvailabilityRecord,
-)
+from urban_ml.storage.models import Station, StationStatusRecord
 
 logger = get_logger(__name__)
 
@@ -32,24 +23,59 @@ _EXPORT_COLUMNS = {
         StationStatusRecord.station_id,
         StationStatusRecord.observed_at,
         StationStatusRecord.num_vehicles_available,
+        StationStatusRecord.num_vehicles_disabled,
         StationStatusRecord.num_docks_available,
+        StationStatusRecord.num_docks_disabled,
         StationStatusRecord.is_installed,
         StationStatusRecord.is_renting,
         StationStatusRecord.is_returning,
-        StationStatusRecord.last_reported,
+        StationStatusRecord.num_vehicles_electric,
+        StationStatusRecord.num_vehicles_human,
     ),
-    STATION_VEHICLE_AVAILABILITY: (
-        StationVehicleAvailabilityRecord.system_id,
-        StationVehicleAvailabilityRecord.station_id,
-        StationVehicleAvailabilityRecord.vehicle_type_id,
-        StationVehicleAvailabilityRecord.observed_at,
-        StationVehicleAvailabilityRecord.count,
+    STATIONS: (
+        Station.system_id,
+        Station.station_id,
+        Station.station_name,
+        Station.address,
+        Station.lat,
+        Station.lon,
+        Station.capacity,
+        Station.is_charging_station,
+        Station.observed_at,
     ),
+}
+
+_PARQUET_SCHEMA: dict[str, dict[str, pl.DataType]] = {
+    STATION_STATUS: {
+        "system_id": pl.String(),
+        "station_id": pl.String(),
+        "observed_at": pl.Datetime("us", "UTC"),
+        "num_vehicles_available": pl.Int64(),
+        "num_vehicles_disabled": pl.Int64(),
+        "num_docks_available": pl.Int64(),
+        "num_docks_disabled": pl.Int64(),
+        "is_installed": pl.Boolean(),
+        "is_renting": pl.Boolean(),
+        "is_returning": pl.Boolean(),
+        "num_vehicles_electric": pl.Int64(),
+        "num_vehicles_human": pl.Int64(),
+    },
+    STATIONS: {
+        "system_id": pl.String(),
+        "station_id": pl.String(),
+        "station_name": pl.String(),
+        "address": pl.String(),
+        "lat": pl.Float64(),
+        "lon": pl.Float64(),
+        "capacity": pl.Int64(),
+        "is_charging_station": pl.Boolean(),
+        "observed_at": pl.Datetime("us", "UTC"),
+    },
 }
 
 _OBSERVED_AT = {
     STATION_STATUS: StationStatusRecord.observed_at,
-    STATION_VEHICLE_AVAILABILITY: StationVehicleAvailabilityRecord.observed_at,
+    STATIONS: Station.observed_at,
 }
 
 
@@ -74,7 +100,16 @@ def day_query(table: str, day: date) -> Select[tuple[object, ...]]:
 
 def read_day(engine: Engine, *, table: str, day: date) -> pl.DataFrame:
     with engine.connect() as connection:
-        return pl.read_database(day_query(table, day), connection)
+        return pl.read_database(
+            day_query(table, day), connection, infer_schema_length=None
+        )
+
+
+def conform(frame: pl.DataFrame, *, table: str) -> pl.DataFrame:
+    """Cast a frame to the archive's declared dtypes and column order."""
+
+    schema = _PARQUET_SCHEMA[table]
+    return frame.select([pl.col(name).cast(dtype) for name, dtype in schema.items()])
 
 
 def write_parquet(frame: pl.DataFrame, destination: Path) -> Path:
@@ -100,7 +135,7 @@ def export_day(
         return None
 
     destination = staging_dir / partition_path(table, day)
-    write_parquet(frame, destination)
+    write_parquet(conform(frame, table=table), destination)
 
     written = pl.read_parquet(destination).height
     if written != frame.height:
@@ -136,30 +171,41 @@ def observed_day_range(engine: Engine, *, table: str) -> tuple[date, date] | Non
     return row.lo.date(), newest.hi.date()
 
 
-def export_station_catalog(
-    engine: Engine, *, day: date, staging_dir: Path
-) -> tuple[Path, int]:
-    """Snapshot the station catalog as it stands on `day`.
+def days_present(engine: Engine, *, table: str) -> set[date]:
+    """Every UTC day for which the table holds rows."""
 
-    compute_features needs capacity, so without this the archive is not a
-    complete training input and training still has to reach into Postgres.
-    Snapshotting per day also builds the capacity history that Postgres
-    destroys by upserting in place.
+    observed_at = _OBSERVED_AT[table]
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(func.date(observed_at).label("day")).distinct()
+        ).all()
+    return {
+        row.day if isinstance(row.day, date) else date.fromisoformat(row.day)
+        for row in rows
+    }
+
+
+def days_needing_export(
+    present: set[date],
+    already_archived: set[date],
+    *,
+    today: date,
+    start: date | None = None,
+) -> list[date]:
+    """Complete days held in the database but not yet in the archive.
+
+    Pure set arithmetic, kept out of the CLI so the rules that actually matter
+    are testable: a day that failed to publish must be retried on the next run,
+    a day already published must not be re-uploaded, and nothing before `start`
+    is ever published at all.
+
+    That last rule is a floor, not a convenience. The archive was reset to
+    begin at cloud-ingestion cutover, and without it an empty archive plus a
+    database full of older rows reads as "38 days missing" and re-uploads
+    precisely what was removed.
     """
 
-    with engine.connect() as connection:
-        frame = pl.read_database(
-            select(
-                Station.system_id,
-                Station.station_id,
-                Station.station_name,
-                Station.lat,
-                Station.lon,
-                Station.capacity,
-            ).order_by(Station.system_id, Station.station_id),
-            connection,
-        )
-
-    destination = write_parquet(frame, staging_dir / catalog_path(day))
-    logger.info("stations %s: %d rows -> %s", day, frame.height, destination)
-    return destination, frame.height
+    complete = {day for day in present if day < today}
+    if start is not None:
+        complete = {day for day in complete if day >= start}
+    return sorted(complete - already_archived)

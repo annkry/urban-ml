@@ -2,13 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
 
-from sqlalchemy import JSON, DateTime, Float, Integer, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import DateTime, Float, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-
-PortableJSON = JSON().with_variant(JSONB(), "postgresql")
 
 
 class Base(DeclarativeBase):
@@ -21,35 +17,39 @@ class IngestionRunStatus(StrEnum):
     FAILURE = "failure"
 
 
-class RawGbfsPayload(Base):
-    """Untouched GBFS API responses."""
+class Station(Base):
+    """A station's details as observed at one moment, appended on change.
 
-    __tablename__ = "raw_gbfs_payloads"
+    This was a current-values table upserted in place, which meant a station
+    that was renamed, moved, or gained docks looked as though it always had
+    today's details. Ingestion fetches the catalog every five minutes, but
+    persisting all of it would write ~300k near-identical rows a day to
+    capture a handful of real changes a year, so only transitions are stored.
+
+    Serving reads the newest row per station instead of a primary-key lookup.
+    Measured at 0.5 ms against 0.035 ms, which is immaterial beside feature
+    building and inference, and it avoids keeping the same facts twice.
+    """
+
+    __tablename__ = "stations"
+    __table_args__ = (
+        UniqueConstraint(
+            "system_id", "station_id", "observed_at", name="uq_stations_identity"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     system_id: Mapped[str] = mapped_column(String, nullable=False)
-    observed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    discovery_url: Mapped[str] = mapped_column(String, nullable=False)
-    system_information_url: Mapped[str] = mapped_column(String, nullable=False)
-    station_status_url: Mapped[str] = mapped_column(String, nullable=False)
-    station_status_payload: Mapped[dict[str, Any]] = mapped_column(
-        PortableJSON, nullable=False
-    )
-
-
-class Station(Base):
-    """Station metadata, one row per station, upserted in place."""
-
-    __tablename__ = "stations"
-
-    system_id: Mapped[str] = mapped_column(String, primary_key=True)
-    station_id: Mapped[str] = mapped_column(String, primary_key=True)
+    station_id: Mapped[str] = mapped_column(String, nullable=False)
     station_name: Mapped[str] = mapped_column(String, nullable=False)
+    address: Mapped[str | None] = mapped_column(String, nullable=True)
     lat: Mapped[float] = mapped_column(Float, nullable=False)
     lon: Mapped[float] = mapped_column(Float, nullable=False)
     capacity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_charging_station: Mapped[bool | None] = mapped_column(nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
 
 
 class VehicleType(Base):
@@ -62,31 +62,6 @@ class VehicleType(Base):
     form_factor: Mapped[str] = mapped_column(String, nullable=False)
     propulsion_type: Mapped[str] = mapped_column(String, nullable=False)
     name: Mapped[str | None] = mapped_column(String, nullable=True)
-
-
-class StationVehicleAvailabilityRecord(Base):
-    """Per-vehicle-type availability at a station, one row per station per
-    vehicle type per run."""
-
-    __tablename__ = "station_vehicle_availability"
-    __table_args__ = (
-        UniqueConstraint(
-            "system_id",
-            "station_id",
-            "vehicle_type_id",
-            "observed_at",
-            name="uq_station_vehicle_availability_identity",
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    observed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    system_id: Mapped[str] = mapped_column(String, nullable=False)
-    station_id: Mapped[str] = mapped_column(String, nullable=False)
-    vehicle_type_id: Mapped[str] = mapped_column(String, nullable=False)
-    count: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class StationStatusRecord(Base):
@@ -109,13 +84,14 @@ class StationStatusRecord(Base):
     system_id: Mapped[str] = mapped_column(String, nullable=False)
     station_id: Mapped[str] = mapped_column(String, nullable=False)
     num_vehicles_available: Mapped[int] = mapped_column(Integer, nullable=False)
+    num_vehicles_disabled: Mapped[int | None] = mapped_column(Integer, nullable=True)
     num_docks_available: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    num_docks_disabled: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_installed: Mapped[bool] = mapped_column(nullable=False)
     is_renting: Mapped[bool] = mapped_column(nullable=False)
     is_returning: Mapped[bool] = mapped_column(nullable=False)
-    last_reported: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    num_vehicles_electric: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    num_vehicles_human: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class IngestionRun(Base):

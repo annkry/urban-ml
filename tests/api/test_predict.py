@@ -10,7 +10,7 @@ from urban_ml.api.main import app
 from urban_ml.domain.station import Station as StationData
 from urban_ml.domain.station_status import StationStatus
 from urban_ml.storage.db import get_db
-from urban_ml.storage.repository import save_station_status, upsert_stations
+from urban_ml.storage.repository import record_station_changes, save_station_status
 
 SYSTEM_ID = "toronto"
 STATION_ID = "station-1"
@@ -38,7 +38,7 @@ def _client(session: Any, *, model: Any, encoding: dict[str, int] | None) -> Tes
 
 
 def _seed_station(session: Any, *, capacity: int = 20) -> None:
-    upsert_stations(
+    record_station_changes(
         session,
         [
             StationData(
@@ -48,8 +48,10 @@ def _seed_station(session: Any, *, capacity: int = 20) -> None:
                 lat=43.6532,
                 lon=-79.3832,
                 capacity=capacity,
+                observed_at=datetime.now(UTC),
             )
         ],
+        system_id=SYSTEM_ID,
     )
     session.commit()
 
@@ -74,7 +76,6 @@ def _seed_status(
                 is_installed=is_installed,
                 is_renting=is_renting,
                 is_returning=True,
-                last_reported=observed_at,
             )
         ],
     )

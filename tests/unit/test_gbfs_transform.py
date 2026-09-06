@@ -3,10 +3,10 @@ from datetime import UTC, datetime
 import pytest
 
 from urban_ml.ingestion.gbfs_client import GbfsRawFeeds
+from urban_ml.domain.station_status import StationStatus
 from urban_ml.processing.gbfs_transform import (
     GbfsTransformError,
     build_station_status,
-    build_station_vehicle_availability,
     build_stations,
     build_vehicle_types,
 )
@@ -17,6 +17,8 @@ from urban_ml.schemas.gbfs import (
     SystemInformationResponse,
     VehicleTypesResponse,
 )
+
+OBSERVED_AT = datetime(2026, 7, 18, 12, tzinfo=UTC)
 
 
 DISCOVERY_PAYLOAD = {
@@ -157,7 +159,9 @@ def test_build_station_status_creates_narrow_status_rows() -> None:
 
 
 def test_build_stations_extracts_metadata() -> None:
-    stations = build_stations(_raw_feeds(), system_id="toronto")
+    stations = build_stations(
+        _raw_feeds(), system_id="toronto", observed_at=OBSERVED_AT
+    )
 
     assert len(stations) == 1
     station = stations[0]
@@ -206,64 +210,81 @@ def test_build_vehicle_types_extracts_metadata() -> None:
     assert ebike.name is None
 
 
-def test_build_station_vehicle_availability_creates_one_row_per_type() -> None:
-    observed_at = datetime(2026, 7, 5, 11, 6, 3, tzinfo=UTC)
+def _status_payload(entries: list[dict] | None) -> dict:
+    """A station_status payload for one station with a given per-type split."""
 
-    records = build_station_vehicle_availability(
-        _raw_feeds(),
-        system_id="toronto",
-        observed_at=observed_at,
-    )
-
-    assert len(records) == 2
-    by_type = {r.vehicle_type_id: r.count for r in records}
-    assert by_type == {"CLASSIC": 5, "EBIKE": 2}
-    assert all(r.station_id == "station-1" for r in records)
-    assert all(r.system_id == "toronto" for r in records)
-    assert all(r.observed_at == observed_at for r in records)
-
-
-def test_build_station_vehicle_availability_skips_stations_without_breakdown() -> None:
-    station_status_payload = {
-        **STATION_STATUS_PAYLOAD,
-        "data": {
-            "stations": [
-                {
-                    k: v
-                    for k, v in STATION_STATUS_PAYLOAD["data"]["stations"][0].items()
-                    if k != "vehicle_types_available"
-                }
-            ]
-        },
+    station: dict[str, object] = {
+        "station_id": "station-1",
+        "num_vehicles_available": 7,
+        "num_vehicles_disabled": 3,
+        "num_docks_available": 13,
+        "num_docks_disabled": 1,
+        "is_installed": True,
+        "is_renting": True,
+        "is_returning": True,
+        "last_reported": "2023-07-17T13:35:13+02:00",
+    }
+    if entries is not None:
+        station["vehicle_types_available"] = entries
+    return {
+        "last_updated": "2023-07-17T13:35:13+02:00",
+        "ttl": 60,
+        "version": "3.0",
+        "data": {"stations": [station]},
     }
 
-    records = build_station_vehicle_availability(
-        _raw_feeds(station_status_payload=station_status_payload),
+
+def _status_for(entries: list[dict] | None) -> StationStatus:
+    return build_station_status(
+        _raw_feeds(station_status_payload=_status_payload(entries)),
         system_id="toronto",
-        observed_at=datetime(2026, 7, 5, 11, 6, 3, tzinfo=UTC),
+        known_station_ids={"station-1"},
+        observed_at=OBSERVED_AT,
+    )[0]
+
+
+def test_disabled_counts_are_carried_through() -> None:
+    """16% of Toronto's fleet is disabled at any moment and it occupies docks,
+    so these are not cosmetic fields."""
+
+    record = _status_for([{"vehicle_type_id": "CLASSIC", "count": 7}])
+
+    assert record.num_vehicles_disabled == 3
+    assert record.num_docks_disabled == 1
+
+
+def test_vehicles_split_by_propulsion_not_by_model() -> None:
+    """Grouping on propulsion_type is what keeps a new bike model from needing
+    a schema change: the columns are electric and human, not per model id."""
+
+    record = _status_for(
+        [
+            {"vehicle_type_id": "CLASSIC", "count": 5},
+            {"vehicle_type_id": "EBIKE", "count": 2},
+        ]
     )
 
-    assert records == []
+    assert record.num_vehicles_electric == 2
+    assert record.num_vehicles_human == 5
+    assert (
+        record.num_vehicles_electric + record.num_vehicles_human
+        == record.num_vehicles_available
+    )
 
 
-def test_build_station_vehicle_availability_rejects_unknown_vehicle_type() -> None:
-    station_status_payload = {
-        **STATION_STATUS_PAYLOAD,
-        "data": {
-            "stations": [
-                {
-                    **STATION_STATUS_PAYLOAD["data"]["stations"][0],
-                    "vehicle_types_available": [
-                        {"vehicle_type_id": "UNKNOWN-TYPE", "count": 1}
-                    ],
-                }
-            ]
-        },
-    }
+def test_a_missing_breakdown_gives_null_not_zero() -> None:
+    """No breakdown reported is different from a genuine zero, and silently
+    recording zero would make the split stop summing to the total."""
 
-    with pytest.raises(GbfsTransformError):
-        build_station_vehicle_availability(
-            _raw_feeds(station_status_payload=station_status_payload),
-            system_id="toronto",
-            observed_at=datetime(2026, 7, 5, 11, 6, 3, tzinfo=UTC),
-        )
+    record = _status_for(None)
+
+    assert record.num_vehicles_electric is None
+    assert record.num_vehicles_human is None
+
+
+def test_an_unknown_vehicle_type_fails_loudly() -> None:
+    """An unrecognised type would otherwise vanish from both columns, so the
+    split would quietly stop reconciling with num_vehicles_available."""
+
+    with pytest.raises(GbfsTransformError, match="CARGO_TRIKE"):
+        _status_for([{"vehicle_type_id": "CARGO_TRIKE", "count": 4}])

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from urban_ml.core.logging import get_logger
@@ -40,3 +41,25 @@ def upload_partitions(
         allow_patterns=["**/*.parquet"],
         commit_message=commit_message,
     )
+
+
+def archived_days(repo_id: str, *, table: str, token: str | None = None) -> set[date]:
+    """Days already published for a table, read from the repo file listing.
+
+    Cheap: a listing call, not a download.
+    """
+
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import RepositoryNotFoundError
+
+    try:
+        files = HfApi().list_repo_files(repo_id, repo_type="dataset", token=token)
+    except RepositoryNotFoundError:
+        return set()
+
+    prefix = f"{table}/date="
+    return {
+        date.fromisoformat(path[len(prefix) :].split("/", 1)[0])
+        for path in files
+        if path.startswith(prefix) and path.endswith(".parquet")
+    }

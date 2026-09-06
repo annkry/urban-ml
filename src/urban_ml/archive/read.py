@@ -56,61 +56,39 @@ def load_raw_status_from_archive(archive_dir: Path, *, system_id: str) -> pl.Dat
     return frame
 
 
-def _latest_catalog(archive_dir: Path) -> pl.DataFrame:
-    """The most recent station-catalog snapshot.
+def station_history(archive_dir: Path, *, system_id: str) -> pl.DataFrame:
+    """Every recorded change to every station, oldest first."""
 
-    Snapshots are dated, but feature computation currently applies one
-    catalog to every row regardless of when it was observed. Using the latest
-    keeps behaviour identical to reading Postgres, which only ever holds
-    current capacities. The dated snapshots accumulate so that an as-of join
-    becomes possible later; nothing reads them that way yet.
-    """
-
-    snapshots = sorted((archive_dir / STATIONS).glob("date=*/*.parquet"))
-    if not snapshots:
-        raise FileNotFoundError(f"No station catalog snapshots under {archive_dir}")
-    return pl.read_parquet(snapshots[-1])
+    return (
+        pl.read_parquet(archive_dir / table_glob(STATIONS))
+        .filter(pl.col("system_id") == system_id)
+        .sort(["station_id", "observed_at"])
+    )
 
 
 def load_stations_from_archive(archive_dir: Path, *, system_id: str) -> pl.DataFrame:
     """Drop-in replacement for modeling.dataset.load_stations.
 
-    Same two columns in the same order, so compute_features cannot tell which
-    source it was given.
+    Collapses the change log to each station's most recent details. Feature
+    computation applies one capacity to every row regardless of when it was
+    observed; joining as-of each observation is a later change, now that the
+    history to join against is finally being recorded.
     """
 
+    history = station_history(archive_dir, system_id=system_id)
+    if history.height == 0:
+        return pl.DataFrame(schema={"station_id": pl.String, "capacity": pl.Int64})
     return (
-        _latest_catalog(archive_dir)
-        .filter(pl.col("system_id") == system_id)
+        history.group_by("station_id")
+        .agg(pl.all().sort_by("observed_at").last())
         .select(["station_id", "capacity"])
+        .sort("station_id")
     )
 
 
 def system_ids_in_archive(archive_dir: Path) -> list[str]:
-    return sorted(_latest_catalog(archive_dir)["system_id"].unique().to_list())
-
-
-def capacity_history(archive_dir: Path, *, system_id: str) -> pl.DataFrame:
-    """Every catalog snapshot, for seeing how capacity changed over time.
-
-    Nothing in training uses this yet — it exists so the accumulating
-    snapshots are reachable, and so a capacity change is visible the moment
-    someone looks for one.
-    """
-
-    frames = [
-        pl.read_parquet(path).with_columns(
-            pl.lit(path.parent.name.removeprefix("date=")).str.to_date().alias("as_of")
-        )
-        for path in sorted((archive_dir / STATIONS).glob("date=*/*.parquet"))
-    ]
-    if not frames:
-        return pl.DataFrame(
-            schema={"station_id": pl.String, "as_of": pl.Date, "capacity": pl.Int64}
-        )
-    return (
-        pl.concat(frames)
-        .filter(pl.col("system_id") == system_id)
-        .select(["station_id", "as_of", "capacity"])
-        .sort(["station_id", "as_of"])
+    return sorted(
+        pl.read_parquet(archive_dir / table_glob(STATIONS))["system_id"]
+        .unique()
+        .to_list()
     )
