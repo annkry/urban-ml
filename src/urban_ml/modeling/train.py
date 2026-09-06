@@ -14,6 +14,12 @@ from mlflow.entities import Metric
 from mlflow.tracking import MlflowClient
 from sqlalchemy.orm import Session
 
+from urban_ml.archive.read import (
+    download_archive,
+    load_raw_status_from_archive,
+    load_stations_from_archive,
+    system_ids_in_archive,
+)
 from urban_ml.core.config import settings
 from urban_ml.core.logging import configure_logging, get_logger
 from urban_ml.features.build_features import (
@@ -321,16 +327,49 @@ def train_and_log_lightgbm(
         return run.info.run_id, test_mae, test_rmse
 
 
-def main() -> int:
+def _resolve_system_id_in(system_ids: list[str]) -> str:
+    if settings.system_id:
+        return settings.system_id
+    if len(system_ids) != 1:
+        raise RuntimeError(
+            f"Expected exactly one system_id, found {system_ids}. "
+            "Set SYSTEM_ID explicitly if multiple systems are expected."
+        )
+    return system_ids[0]
+
+
+def _load_training_inputs() -> tuple[str, pl.DataFrame, pl.DataFrame]:
+    """The system, its station catalog and its full history.
+
+    The archive is the training source: once retention trimming is on,
+    Postgres holds only the few days serving needs. The catalog lives there
+    too, so training needs no database connection at all. The Postgres path
+    remains for running before the archive is populated, and says so loudly.
+    """
+
+    if settings.hf_dataset_repo:
+        archive_dir = download_archive(
+            settings.hf_dataset_repo, token=settings.hf_token
+        )
+        system_id = _resolve_system_id_in(system_ids_in_archive(archive_dir))
+        stations = load_stations_from_archive(archive_dir, system_id=system_id)
+        raw = load_raw_status_from_archive(archive_dir, system_id=system_id)
+        return system_id, stations, raw
+
+    logger.warning(
+        "HF_DATASET_REPO is not set; reading from Postgres, which holds only "
+        "the retained window once trimming is enabled."
+    )
     with get_session() as session:
         system_id = _resolve_system_id(session)
         stations = load_stations(session, system_id=system_id)
+    return system_id, stations, load_raw_status(engine, system_id=system_id)
 
+
+def main() -> int:
+    system_id, stations, raw = _load_training_inputs()
     encoding = build_station_id_encoding(stations)
-
-    logger.info("Loading station_status history for system_id=%s", system_id)
-    raw = load_raw_status(engine, system_id=system_id)
-    logger.info("Loaded %d raw rows", raw.height)
+    logger.info("Loaded %d raw rows for system_id=%s", raw.height, system_id)
 
     features = compute_features(raw, stations)
     labeled = add_target(

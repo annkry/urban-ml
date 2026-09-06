@@ -1,0 +1,43 @@
+name: Archive to Hub
+
+on:
+  schedule:
+    - cron: "20 4 * * *"
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: "Export every day present in the database"
+        type: boolean
+        default: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: archive-to-hub
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: make install
+
+      - name: Export and publish
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          uv run python scripts/archive_to_hub.py \
+            ${{ inputs.backfill && '--backfill' || '' }}

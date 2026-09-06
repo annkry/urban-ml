@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     forecast_horizon_minutes: int = 120
     system_id: str | None = None
 
+    # Archive settings. The archive holds the full history for training
+    hf_dataset_repo: str = ""
+    hf_token: str | None = None
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -45,5 +45,11 @@ run:
 train:
 	uv run python scripts/train_model.py
 
+archive:
+	uv run python scripts/archive_to_hub.py
+
+archive-backfill:
+	uv run python scripts/archive_to_hub.py --backfill
+
 mlflow-ui:
 	uv run mlflow ui --backend-store-uri sqlite:///mlflow.db

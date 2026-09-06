@@ -25,6 +25,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "httpx2>=2.5.0",
+    "huggingface-hub>=0.35",
     "matplotlib>=3.11.1",
     "mlflow>=3.15.1",
     "mypy>=2.1.0",
