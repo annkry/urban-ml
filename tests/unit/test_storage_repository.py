@@ -2,11 +2,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from urban_ml.domain.station import Station as StationData
 from urban_ml.domain.station_status import StationStatus
-from urban_ml.domain.station_vehicle_availability import StationVehicleAvailability
 from urban_ml.domain.vehicle_type import VehicleType as VehicleTypeData
 from urban_ml.ingestion.gbfs_client import GbfsRawFeeds
 from urban_ml.schemas.gbfs import (
@@ -17,27 +17,23 @@ from urban_ml.schemas.gbfs import (
     VehicleTypesResponse,
 )
 from urban_ml.storage.models import (
+    Station,
     IngestionRun,
     IngestionRunStatus,
-    RawGbfsPayload,
-    Station,
     StationStatusRecord,
-    StationVehicleAvailabilityRecord,
     VehicleType,
 )
 from urban_ml.storage.repository import (
+    TRACKED_STATION_FIELDS,
     complete_ingestion_run,
     fail_ingestion_run,
     fetch_recent_station_status,
     get_station,
-    list_stations,
-    list_system_ids,
-    save_raw_gbfs_payload,
+    latest_stations,
+    record_station_changes,
     save_station_status,
-    save_station_vehicle_availability,
     start_ingestion_run,
     station_status_history_query,
-    upsert_stations,
     upsert_vehicle_types,
 )
 
@@ -133,54 +129,6 @@ def _vehicle_type_data(**overrides: object) -> VehicleTypeData:
     )
     defaults.update(overrides)
     return VehicleTypeData(**defaults)  # type: ignore[arg-type]
-
-
-def _availability(**overrides: object) -> StationVehicleAvailability:
-    defaults = dict(
-        observed_at=OBSERVED_AT,
-        system_id="toronto",
-        station_id="station-1",
-        vehicle_type_id="CLASSIC",
-        count=5,
-    )
-    defaults.update(overrides)
-    return StationVehicleAvailability(**defaults)  # type: ignore[arg-type]
-
-
-def test_save_raw_gbfs_payload_persists_status_payload_only(session) -> None:
-    save_raw_gbfs_payload(
-        session, _raw_feeds(), system_id="toronto", observed_at=OBSERVED_AT
-    )
-    session.commit()
-
-    stored = session.scalars(select(RawGbfsPayload)).one()
-    assert stored.system_id == "toronto"
-    assert stored.observed_at.replace(tzinfo=UTC) == OBSERVED_AT
-    assert stored.discovery_url == "https://example.com/gbfs.json"
-    assert stored.station_status_payload["version"] == "3.0"
-
-
-def test_upsert_stations_inserts_new_station(session) -> None:
-    upsert_stations(session, [_station_data()])
-    session.commit()
-
-    stored = session.scalars(select(Station)).one()
-    assert stored.station_id == "station-1"
-    assert stored.station_name == "Main Station"
-    assert stored.capacity == 20
-
-
-def test_upsert_stations_updates_existing_station_in_place(session) -> None:
-    upsert_stations(session, [_station_data(capacity=20)])
-    session.commit()
-
-    upsert_stations(session, [_station_data(capacity=25, station_name="Renamed")])
-    session.commit()
-
-    stations = session.scalars(select(Station)).all()
-    assert len(stations) == 1
-    assert stations[0].capacity == 25
-    assert stations[0].station_name == "Renamed"
 
 
 def test_save_station_status_persists_narrow_rows(session) -> None:
@@ -279,56 +227,8 @@ def test_upsert_vehicle_types_updates_existing_type_in_place(session) -> None:
     assert types[0].propulsion_type == "electric_assist"
 
 
-def test_save_station_vehicle_availability_persists_rows(session) -> None:
-    save_station_vehicle_availability(session, [_availability()])
-    session.commit()
-
-    stored = session.scalars(select(StationVehicleAvailabilityRecord)).one()
-    assert stored.station_id == "station-1"
-    assert stored.vehicle_type_id == "CLASSIC"
-    assert stored.count == 5
-
-
 def test_get_station_returns_none_when_missing(session) -> None:
     assert get_station(session, system_id="toronto", station_id="missing") is None
-
-
-def test_get_station_returns_matching_station(session) -> None:
-    upsert_stations(session, [_station_data()])
-    session.commit()
-
-    found = get_station(session, system_id="toronto", station_id="station-1")
-    assert found is not None
-    assert found.station_name == "Main Station"
-
-
-def test_list_stations_filters_by_system_id(session) -> None:
-    upsert_stations(
-        session,
-        [
-            _station_data(station_id="station-1"),
-            _station_data(station_id="station-2"),
-            _station_data(system_id="other-system", station_id="station-3"),
-        ],
-    )
-    session.commit()
-
-    stations = list_stations(session, system_id="toronto")
-    assert {s.station_id for s in stations} == {"station-1", "station-2"}
-
-
-def test_list_system_ids_returns_distinct_values(session) -> None:
-    upsert_stations(
-        session,
-        [
-            _station_data(station_id="station-1"),
-            _station_data(station_id="station-2"),
-            _station_data(system_id="other-system", station_id="station-3"),
-        ],
-    )
-    session.commit()
-
-    assert set(list_system_ids(session)) == {"toronto", "other-system"}
 
 
 def test_fetch_recent_station_status_filters_by_station_and_since(session) -> None:
@@ -371,3 +271,190 @@ def test_station_status_history_query_selects_expected_columns(session) -> None:
     assert row.station_id == "station-1"
     assert row.num_vehicles_available == 7
     assert row.is_renting is True
+
+
+def _station_data(**overrides: object) -> StationData:
+    defaults: dict[str, object] = dict(
+        system_id="toronto",
+        station_id="a",
+        station_name="Alpha",
+        address="1 Main St",
+        lat=43.6,
+        lon=-79.4,
+        capacity=20,
+        is_charging_station=False,
+        observed_at=OBSERVED_AT,
+    )
+    defaults.update(overrides)
+    return StationData(**defaults)  # type: ignore[arg-type]
+
+
+def test_first_sighting_of_a_station_records_a_baseline(session: Session) -> None:
+    appended = record_station_changes(session, [_station_data()], system_id="toronto")
+    session.commit()
+
+    assert appended == 1
+    assert [s.capacity for s in latest_stations(session, system_id="toronto")] == [20]
+
+
+def test_an_unchanged_station_writes_nothing(session: Session) -> None:
+    """The point of the change log: ingestion runs 288 times a day and must not
+    append 288 identical rows per station."""
+
+    record_station_changes(session, [_station_data()], system_id="toronto")
+    session.commit()
+
+    appended = record_station_changes(
+        session,
+        [_station_data(observed_at=OBSERVED_AT + timedelta(minutes=5))],
+        system_id="toronto",
+    )
+    session.commit()
+
+    assert appended == 0
+    assert len(session.scalars(select(Station)).all()) == 1
+
+
+def test_any_changed_detail_appends_a_row(session: Session) -> None:
+    record_station_changes(session, [_station_data()], system_id="toronto")
+    session.commit()
+
+    later = OBSERVED_AT + timedelta(days=1)
+    appended = record_station_changes(
+        session,
+        [_station_data(capacity=30, station_name="Alpha North", observed_at=later)],
+        system_id="toronto",
+    )
+    session.commit()
+
+    assert appended == 1
+    history = session.scalars(select(Station).order_by(Station.observed_at)).all()
+    assert [row.capacity for row in history] == [20, 30]
+    assert [row.station_name for row in history] == ["Alpha", "Alpha North"]
+
+
+def test_latest_stations_returns_only_the_newest_row(session: Session) -> None:
+    record_station_changes(session, [_station_data()], system_id="toronto")
+    session.commit()
+    record_station_changes(
+        session,
+        [_station_data(capacity=30, observed_at=OBSERVED_AT + timedelta(days=1))],
+        system_id="toronto",
+    )
+    session.commit()
+
+    current = latest_stations(session, system_id="toronto")
+
+    assert len(current) == 1
+    assert current[0].capacity == 30
+
+
+def test_get_station_reads_through_the_change_log(session: Session) -> None:
+    """Serving swapped a primary-key lookup for newest-row-per-station, so this
+    guards the path /predict actually takes."""
+
+    record_station_changes(session, [_station_data()], system_id="toronto")
+    session.commit()
+    record_station_changes(
+        session,
+        [_station_data(capacity=44, observed_at=OBSERVED_AT + timedelta(days=1))],
+        system_id="toronto",
+    )
+    session.commit()
+
+    station = get_station(session, system_id="toronto", station_id="a")
+
+    assert station is not None
+    assert station.capacity == 44
+
+
+def test_only_the_changed_station_is_appended(session: Session) -> None:
+    record_station_changes(
+        session,
+        [_station_data(), _station_data(station_id="b", capacity=15)],
+        system_id="toronto",
+    )
+    session.commit()
+
+    later = OBSERVED_AT + timedelta(days=1)
+    appended = record_station_changes(
+        session,
+        [
+            _station_data(observed_at=later),
+            _station_data(station_id="b", capacity=25, observed_at=later),
+        ],
+        system_id="toronto",
+    )
+    session.commit()
+
+    assert appended == 1
+    assert {
+        s.station_id: s.capacity for s in latest_stations(session, system_id="toronto")
+    } == {
+        "a": 20,
+        "b": 25,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "new_value"),
+    [
+        ("station_name", "Alpha North"),
+        ("address", "2 Other Rd"),
+        ("lat", 43.7),
+        ("lon", -79.5),
+        ("capacity", 30),
+        ("is_charging_station", True),
+    ],
+)
+def test_a_change_to_any_single_field_appends_a_row(
+    session: Session, field: str, new_value: object
+) -> None:
+    """Comparison is by station_id across every tracked field, so a change to
+    any one of them on its own is enough."""
+
+    record_station_changes(session, [_station_data()], system_id="toronto")
+    session.commit()
+
+    appended = record_station_changes(
+        session,
+        [
+            _station_data(
+                **{field: new_value, "observed_at": OBSERVED_AT + timedelta(days=1)}
+            )
+        ],
+        system_id="toronto",
+    )
+    session.commit()
+
+    assert appended == 1
+    current = latest_stations(session, system_id="toronto")[0]
+    assert getattr(current, field) == new_value
+
+
+def test_observed_at_alone_is_not_a_change(session: Session) -> None:
+    """observed_at moves every five minutes. Comparing it would make every run
+    look like a change and defeat the whole point of the log."""
+
+    record_station_changes(session, [_station_data()], system_id="toronto")
+    session.commit()
+
+    appended = record_station_changes(
+        session,
+        [_station_data(observed_at=OBSERVED_AT + timedelta(days=99))],
+        system_id="toronto",
+    )
+    session.commit()
+
+    assert appended == 0
+
+
+def test_every_station_column_is_either_tracked_or_deliberately_excluded() -> None:
+    """Guards against a column being added to the model without deciding
+    whether a change to it should be recorded. Without this, a new field would
+    silently never trigger a row."""
+
+    columns = {c.name for c in Station.__table__.columns}
+    identity_and_bookkeeping = {"id", "system_id", "station_id", "observed_at"}
+
+    assert columns - identity_and_bookkeeping == set(TRACKED_STATION_FIELDS)

@@ -11,10 +11,8 @@ from urban_ml.processing.gbfs_transform import GbfsTransformError
 from urban_ml.storage.models import (
     IngestionRun,
     IngestionRunStatus,
-    RawGbfsPayload,
     Station,
     StationStatusRecord,
-    StationVehicleAvailabilityRecord,
     VehicleType,
 )
 
@@ -36,7 +34,7 @@ def test_format_ingestion_summary_includes_counts() -> None:
         matched_station_status_count=2,
         processed_station_status_count=2,
         vehicle_type_count=4,
-        station_vehicle_availability_count=6,
+        station_change_count=6,
     )
 
     formatted = format_ingestion_summary(summary)
@@ -47,7 +45,7 @@ def test_format_ingestion_summary_includes_counts() -> None:
     assert "Station statuses discovered: 3" in formatted
     assert "Stations with matching status: 2" in formatted
     assert "Vehicle types: 4" in formatted
-    assert "Station vehicle availability rows: 6" in formatted
+    assert "Station detail changes recorded: 6" in formatted
 
 
 def _payloads() -> dict[str, dict]:
@@ -151,10 +149,7 @@ def test_ingest_gbfs_station_feeds_persists_raw_payload_status_and_run(
     assert summary.matched_station_status_count == 1
     assert summary.processed_station_status_count == 1
     assert summary.vehicle_type_count == 2
-    assert summary.station_vehicle_availability_count == 2
-
-    raw_payload = session.scalars(select(RawGbfsPayload)).one()
-    assert raw_payload.system_id == "bike_share_toronto"
+    assert summary.station_change_count == 1
 
     station = session.scalars(select(Station)).one()
     assert station.station_id == "station-1"
@@ -166,12 +161,6 @@ def test_ingest_gbfs_station_feeds_persists_raw_payload_status_and_run(
 
     vehicle_types = session.scalars(select(VehicleType)).all()
     assert {vt.vehicle_type_id for vt in vehicle_types} == {"CLASSIC", "EBIKE"}
-
-    availability = session.scalars(select(StationVehicleAvailabilityRecord)).all()
-    assert {(a.vehicle_type_id, a.count) for a in availability} == {
-        ("CLASSIC", 5),
-        ("EBIKE", 2),
-    }
 
     run = session.scalars(select(IngestionRun)).one()
     assert run.status == IngestionRunStatus.SUCCESS
@@ -203,7 +192,6 @@ def test_ingest_gbfs_station_feeds_records_failed_run_with_unknown_system_id(
     assert run.error_message == "upstream is down"
 
     assert session.scalars(select(StationStatusRecord)).first() is None
-    assert session.scalars(select(RawGbfsPayload)).first() is None
     assert session.scalars(select(Station)).first() is None
     assert session.scalars(select(VehicleType)).first() is None
 

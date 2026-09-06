@@ -11,27 +11,20 @@ from sqlalchemy.pool import StaticPool
 
 from urban_ml.archive.export import (
     day_bounds,
+    days_needing_export,
+    days_present,
     export_day,
-    export_station_catalog,
     observed_day_range,
 )
 from urban_ml.archive.layout import (
     STATION_STATUS,
-    STATION_VEHICLE_AVAILABILITY,
+    STATIONS,
     partition_path,
 )
 from urban_ml.archive.read import (
-    capacity_history,
     load_raw_status_from_archive,
-    load_stations_from_archive,
-    system_ids_in_archive,
 )
-from urban_ml.storage.models import (
-    Base,
-    Station,
-    StationStatusRecord,
-    StationVehicleAvailabilityRecord,
-)
+from urban_ml.storage.models import Base, Station, StationStatusRecord
 
 SYSTEM_ID = "toronto"
 
@@ -64,7 +57,6 @@ def engine_with_rows():  # type: ignore[no-untyped-def]
             is_installed=True,
             is_renting=True,
             is_returning=True,
-            last_reported=moment,
         )
 
     session: Session = factory()
@@ -76,24 +68,27 @@ def engine_with_rows():  # type: ignore[no-untyped-def]
             status(6, 3, "a", 9),
         ]
     )
-    session.add(
-        StationVehicleAvailabilityRecord(
-            observed_at=datetime(2026, 9, 4, 12, tzinfo=UTC),
-            system_id=SYSTEM_ID,
-            station_id="a",
-            vehicle_type_id="ebike",
-            count=3,
-        )
-    )
-    session.add(
-        Station(
-            system_id=SYSTEM_ID,
-            station_id="a",
-            station_name="Alpha",
-            lat=43.6,
-            lon=-79.4,
-            capacity=20,
-        )
+    session.add_all(
+        [
+            Station(
+                system_id=SYSTEM_ID,
+                station_id="a",
+                station_name="Alpha",
+                lat=43.6,
+                lon=-79.4,
+                capacity=20,
+                observed_at=datetime(2026, 9, 4, tzinfo=UTC),
+            ),
+            Station(
+                system_id=SYSTEM_ID,
+                station_id="a",
+                station_name="Alpha",
+                lat=43.6,
+                lon=-79.4,
+                capacity=30,
+                observed_at=datetime(2026, 9, 6, tzinfo=UTC),
+            ),
+        ]
     )
     session.commit()
     session.close()
@@ -143,21 +138,6 @@ def test_export_day_returns_none_for_a_day_with_no_rows(
         is None
     )
     assert list(tmp_path.rglob("*.parquet")) == []
-
-
-def test_export_day_handles_the_vehicle_availability_table(
-    engine_with_rows,  # type: ignore[no-untyped-def]
-    tmp_path: Path,
-) -> None:
-    result = export_day(
-        engine_with_rows,
-        table=STATION_VEHICLE_AVAILABILITY,
-        day=date(2026, 9, 4),
-        staging_dir=tmp_path,
-    )
-
-    assert result is not None
-    assert pl.read_parquet(result[0])["vehicle_type_id"].to_list() == ["ebike"]
 
 
 def test_re_exporting_a_day_overwrites_rather_than_appends(
@@ -226,90 +206,81 @@ def test_archive_read_filters_by_system_id(
     assert load_raw_status_from_archive(tmp_path, system_id="montreal").height == 0
 
 
-def test_station_catalog_is_exported_because_features_need_capacity(
+def test_partitions_share_one_schema_even_when_a_column_is_all_null(
     engine_with_rows,  # type: ignore[no-untyped-def]
     tmp_path: Path,
 ) -> None:
-    """Without the catalog the archive is not a complete training input:
-    compute_features requires {station_id, capacity}."""
+    """A column that is entirely NULL on one day would otherwise be written as
+    Null there and as its real type elsewhere, and a scan across the archive
+    fails with a dtype mismatch. Columns added by a migration are all-NULL for
+    every earlier day, so this is the normal case."""
 
-    destination, rows = export_station_catalog(
-        engine_with_rows, day=date(2026, 9, 6), staging_dir=tmp_path
-    )
+    for day in (date(2026, 9, 4), date(2026, 9, 6)):
+        export_day(engine_with_rows, table=STATIONS, day=day, staging_dir=tmp_path)
+        export_day(
+            engine_with_rows, table=STATION_STATUS, day=day, staging_dir=tmp_path
+        )
 
-    assert rows == 1
-    assert destination.exists()
-    assert load_stations_from_archive(tmp_path, system_id=SYSTEM_ID).to_dicts() == [
-        {"station_id": "a", "capacity": 20}
+    for table in (STATIONS, STATION_STATUS):
+        schemas = {
+            tuple(pl.read_parquet_schema(f).items())
+            for f in sorted((tmp_path / table).glob("date=*/*.parquet"))
+        }
+        assert len(schemas) == 1, f"{table} partitions disagree on schema"
+
+    assert pl.read_parquet(tmp_path / STATIONS / "**" / "*.parquet").height > 0
+
+
+TODAY = date(2026, 9, 6)
+
+
+def test_a_failed_day_is_retried_on_the_next_run() -> None:
+    """The rule that stops one failed job becoming permanent data loss:
+    exporting only 'yesterday' never retries, so a missed day is gone once
+    retention trims it out of the database."""
+
+    present = {date(2026, 9, 3), date(2026, 9, 4), date(2026, 9, 5)}
+    already = {date(2026, 9, 3), date(2026, 9, 5)}
+
+    assert days_needing_export(present, already, today=TODAY) == [date(2026, 9, 4)]
+
+
+def test_today_is_never_exported_because_it_is_still_being_written() -> None:
+    assert days_needing_export({date(2026, 9, 5), TODAY}, set(), today=TODAY) == [
+        date(2026, 9, 5)
     ]
 
 
-def test_catalog_columns_match_what_compute_features_requires(
-    engine_with_rows,  # type: ignore[no-untyped-def]
-    tmp_path: Path,
-) -> None:
-    export_station_catalog(engine_with_rows, day=date(2026, 9, 6), staging_dir=tmp_path)
+def test_a_fully_published_archive_exports_nothing() -> None:
+    present = {date(2026, 9, 4), date(2026, 9, 5)}
 
-    assert load_stations_from_archive(tmp_path, system_id=SYSTEM_ID).columns == [
-        "station_id",
-        "capacity",
+    assert days_needing_export(present, present, today=TODAY) == []
+
+
+def test_days_present_reports_the_days_holding_rows(engine_with_rows) -> None:  # type: ignore[no-untyped-def]
+    assert days_present(engine_with_rows, table=STATION_STATUS) == {
+        date(2026, 9, 4),
+        date(2026, 9, 6),
+    }
+
+
+def test_nothing_before_the_start_date_is_ever_archived() -> None:
+    """The archive was reset to begin at cloud-ingestion cutover. Without a
+    floor, an empty archive plus a database full of older rows reads as
+    "every day is missing" and re-uploads exactly what was removed."""
+
+    present = {date(2026, 7, 19), date(2026, 9, 4), date(2026, 9, 5)}
+
+    assert days_needing_export(present, set(), today=TODAY, start=date(2026, 9, 4)) == [
+        date(2026, 9, 4),
+        date(2026, 9, 5),
     ]
 
 
-def test_system_ids_in_archive_reads_the_catalog(
-    engine_with_rows,  # type: ignore[no-untyped-def]
-    tmp_path: Path,
-) -> None:
-    export_station_catalog(engine_with_rows, day=date(2026, 9, 6), staging_dir=tmp_path)
+def test_no_start_date_means_no_floor() -> None:
+    present = {date(2026, 9, 4), date(2026, 9, 5)}
 
-    assert system_ids_in_archive(tmp_path) == [SYSTEM_ID]
-
-
-def test_catalog_snapshots_accumulate_and_capture_capacity_changes(
-    engine_with_rows,  # type: ignore[no-untyped-def]
-    tmp_path: Path,
-) -> None:
-    """The whole point of dating the catalog: Postgres upserts capacity in
-    place, so a change is invisible there the moment it happens. Snapshots
-    are the only record that it ever changed."""
-
-    export_station_catalog(engine_with_rows, day=date(2026, 9, 6), staging_dir=tmp_path)
-
-    factory = sessionmaker(bind=engine_with_rows, expire_on_commit=False)
-    session: Session = factory()
-    station = session.get(Station, (SYSTEM_ID, "a"))
-    assert station is not None
-    station.capacity = 30
-    session.commit()
-    session.close()
-
-    export_station_catalog(engine_with_rows, day=date(2026, 9, 7), staging_dir=tmp_path)
-
-    history = capacity_history(tmp_path, system_id=SYSTEM_ID)
-    assert history["as_of"].to_list() == [date(2026, 9, 6), date(2026, 9, 7)]
-    assert history["capacity"].to_list() == [20, 30]
-
-
-def test_features_use_the_most_recent_catalog(
-    engine_with_rows,  # type: ignore[no-untyped-def]
-    tmp_path: Path,
-) -> None:
-    """Documents current behaviour rather than endorsing it: every row gets
-    the latest capacity, matching what reading Postgres does. An as-of join
-    is a later change, once there is history worth joining against."""
-
-    export_station_catalog(engine_with_rows, day=date(2026, 9, 6), staging_dir=tmp_path)
-
-    factory = sessionmaker(bind=engine_with_rows, expire_on_commit=False)
-    session: Session = factory()
-    station = session.get(Station, (SYSTEM_ID, "a"))
-    assert station is not None
-    station.capacity = 30
-    session.commit()
-    session.close()
-
-    export_station_catalog(engine_with_rows, day=date(2026, 9, 7), staging_dir=tmp_path)
-
-    assert load_stations_from_archive(tmp_path, system_id=SYSTEM_ID).to_dicts() == [
-        {"station_id": "a", "capacity": 30}
+    assert days_needing_export(present, set(), today=TODAY, start=None) == [
+        date(2026, 9, 4),
+        date(2026, 9, 5),
     ]

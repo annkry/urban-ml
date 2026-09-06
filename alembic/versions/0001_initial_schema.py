@@ -11,9 +11,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
 from alembic import op
 
-from urban_ml.storage.models import PortableJSON
+PortableJSON = sa.JSON().with_variant(JSONB(), "postgresql")
 
 revision: str = "0001"
 down_revision: str | None = None

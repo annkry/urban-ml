@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import argparse
 import tempfile
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from urban_ml.archive.export import (
+    days_needing_export,
+    days_present,
     export_day,
-    export_station_catalog,
-    observed_day_range,
 )
 from urban_ml.archive.layout import ARCHIVED_TABLES, STATION_STATUS
-from urban_ml.archive.publish import upload_partitions
+from urban_ml.archive.publish import archived_days, upload_partitions
 from urban_ml.core.config import settings
 from urban_ml.core.logging import configure_logging, get_logger
 from urban_ml.storage.db import engine
@@ -41,18 +41,37 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _days_to_export(args: argparse.Namespace) -> list[date]:
+    """Every complete day in the database that the archive does not hold.
+
+    Deliberately not "yesterday". A job that only ever exports yesterday never
+    retries, so one failed run leaves a permanent hole the moment retention
+    trims those rows out of the database. Diffing against what is already
+    published makes the job self-healing, and re-running it changes nothing.
+
+    Today is excluded because it is still being written to; exporting it would
+    publish a partial day that no later run would correct.
+    """
+
+    today = datetime.now(UTC).date()
     if args.day:
         return [args.day]
-    if not args.backfill:
-        return [(datetime.now(UTC) - timedelta(days=1)).date()]
 
-    bounds = observed_day_range(engine, table=STATION_STATUS)
-    if bounds is None:
-        return []
-    first, last = bounds
-    today = datetime.now(UTC).date()
-    last = min(last, today - timedelta(days=1))
-    return [first + timedelta(days=n) for n in range((last - first).days + 1)]
+    present = days_present(engine, table=STATION_STATUS)
+    start = settings.archive_start_date
+    if args.backfill:
+        return days_needing_export(present, set(), today=today, start=start)
+
+    already = archived_days(
+        settings.hf_dataset_repo, table=STATION_STATUS, token=settings.hf_token
+    )
+    missing = days_needing_export(present, already, today=today, start=start)
+    if already and len(missing) > 1:
+        logger.warning(
+            "Archive was missing %d complete days; exporting them now: %s",
+            len(missing),
+            ", ".join(str(day) for day in missing),
+        )
+    return missing
 
 
 def main() -> int:
@@ -79,11 +98,6 @@ def main() -> int:
                 result = export_day(engine, table=table, day=day, staging_dir=staging)
                 if result is not None:
                     totals[table] += result[1]
-
-        _, catalog_rows = export_station_catalog(
-            engine, day=datetime.now(UTC).date(), staging_dir=staging
-        )
-        logger.info("stations: %d rows staged", catalog_rows)
 
         for table, rows in totals.items():
             logger.info("%s: %d rows staged", table, rows)

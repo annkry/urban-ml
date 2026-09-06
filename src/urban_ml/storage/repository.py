@@ -4,61 +4,100 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from urban_ml.domain.station import Station as StationData
 from urban_ml.domain.station_status import StationStatus
-from urban_ml.domain.station_vehicle_availability import StationVehicleAvailability
 from urban_ml.domain.vehicle_type import VehicleType as VehicleTypeData
-from urban_ml.ingestion.gbfs_client import GbfsRawFeeds
 from urban_ml.storage.models import (
     IngestionRun,
     IngestionRunStatus,
-    RawGbfsPayload,
     Station,
     StationStatusRecord,
-    StationVehicleAvailabilityRecord,
     VehicleType,
 )
 
 
-def save_raw_gbfs_payload(
-    session: Session,
-    raw_feeds: GbfsRawFeeds,
-    *,
-    system_id: str,
-    observed_at: datetime,
-) -> RawGbfsPayload:
-    payload = RawGbfsPayload(
-        system_id=system_id,
-        observed_at=observed_at,
-        discovery_url=raw_feeds.discovery_url,
-        system_information_url=raw_feeds.system_information_url,
-        station_status_url=raw_feeds.station_status_url,
-        station_status_payload=raw_feeds.station_status_payload,
+def latest_stations(session: Session, *, system_id: str) -> Sequence[Station]:
+    """The newest recorded row for each station.
+
+    `stations` is a change log, so "current" means the most recent row rather
+    than the only row.
+    """
+
+    newest = (
+        select(
+            Station.station_id,
+            func.max(Station.observed_at).label("observed_at"),
+        )
+        .where(Station.system_id == system_id)
+        .group_by(Station.station_id)
+        .subquery()
     )
-    session.add(payload)
-    return payload
+    stmt = select(Station).join(
+        newest,
+        (Station.station_id == newest.c.station_id)
+        & (Station.observed_at == newest.c.observed_at)
+        & (Station.system_id == system_id),
+    )
+    return session.scalars(stmt).all()
 
 
-def upsert_stations(
+TRACKED_STATION_FIELDS = (
+    "station_name",
+    "address",
+    "lat",
+    "lon",
+    "capacity",
+    "is_charging_station",
+)
+
+
+def _station_details(station: Station | StationData) -> tuple[object, ...]:
+    return tuple(getattr(station, field) for field in TRACKED_STATION_FIELDS)
+
+
+def record_station_changes(
     session: Session,
     stations: list[StationData],
-) -> None:
-    """Insert new stations or update existing ones in place."""
+    *,
+    system_id: str,
+) -> int:
+    """Append a row for each station whose details differ from last time.
 
-    for station in stations:
-        session.merge(
+    Compared by station_id, and any one differing field is enough. A station
+    seen for the first time is recorded, so every station has a baseline;
+    thereafter a run that changes nothing writes nothing. Returns the number of
+    rows appended, which on a normal run is zero.
+    """
+
+    known = {
+        row.station_id: _station_details(row)
+        for row in latest_stations(session, system_id=system_id)
+    }
+    changed = [
+        station
+        for station in stations
+        if known.get(station.station_id) != _station_details(station)
+    ]
+    session.add_all(
+        [
             Station(
                 system_id=station.system_id,
                 station_id=station.station_id,
                 station_name=station.station_name,
+                address=station.address,
                 lat=station.lat,
                 lon=station.lon,
                 capacity=station.capacity,
+                is_charging_station=station.is_charging_station,
+                observed_at=station.observed_at,
             )
-        )
+            for station in changed
+        ]
+    )
+    return len(changed)
 
 
 def upsert_vehicle_types(
@@ -79,22 +118,6 @@ def upsert_vehicle_types(
         )
 
 
-def save_station_vehicle_availability(
-    session: Session,
-    records: list[StationVehicleAvailability],
-) -> None:
-    for record in records:
-        session.add(
-            StationVehicleAvailabilityRecord(
-                observed_at=record.observed_at,
-                system_id=record.system_id,
-                station_id=record.station_id,
-                vehicle_type_id=record.vehicle_type_id,
-                count=record.count,
-            )
-        )
-
-
 def save_station_status(
     session: Session,
     records: list[StationStatus],
@@ -106,11 +129,14 @@ def save_station_status(
                 system_id=record.system_id,
                 station_id=record.station_id,
                 num_vehicles_available=record.num_vehicles_available,
+                num_vehicles_disabled=record.num_vehicles_disabled,
                 num_docks_available=record.num_docks_available,
+                num_docks_disabled=record.num_docks_disabled,
                 is_installed=record.is_installed,
                 is_renting=record.is_renting,
                 is_returning=record.is_returning,
-                last_reported=record.last_reported,
+                num_vehicles_electric=record.num_vehicles_electric,
+                num_vehicles_human=record.num_vehicles_human,
             )
         )
 
@@ -168,12 +194,19 @@ def fail_ingestion_run(
 
 
 def get_station(session: Session, *, system_id: str, station_id: str) -> Station | None:
-    return session.get(Station, (system_id, station_id))
+    """Newest recorded details for one station."""
+
+    stmt = (
+        select(Station)
+        .where(Station.system_id == system_id, Station.station_id == station_id)
+        .order_by(Station.observed_at.desc())
+        .limit(1)
+    )
+    return session.scalars(stmt).first()
 
 
 def list_stations(session: Session, *, system_id: str) -> Sequence[Station]:
-    stmt = select(Station).where(Station.system_id == system_id)
-    return session.scalars(stmt).all()
+    return latest_stations(session, system_id=system_id)
 
 
 def list_system_ids(session: Session) -> Sequence[str]:

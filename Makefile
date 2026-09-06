@@ -42,6 +42,9 @@ db-revision:
 run:
 	uv run uvicorn urban_ml.api.main:app --reload
 
+run-ingest-service:
+	uv run uvicorn urban_ml.api.ingest_app:app --reload --port 8001
+
 train:
 	uv run python scripts/train_model.py
 

@@ -1,3 +1,4 @@
+from datetime import date
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -28,6 +29,9 @@ class Settings(BaseSettings):
     # Archive settings. The archive holds the full history for training
     hf_dataset_repo: str = ""
     hf_token: str | None = None
+
+    # Days before this are never archived.
+    archive_start_date: date | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

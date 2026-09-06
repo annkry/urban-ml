@@ -19,18 +19,15 @@ from urban_ml.processing.gbfs_transform import (
     GbfsTransformError,
     build_station_status,
     build_stations,
-    build_station_vehicle_availability,
     build_vehicle_types,
 )
 from urban_ml.storage.db import get_session
 from urban_ml.storage.repository import (
     complete_ingestion_run,
     fail_ingestion_run,
-    save_raw_gbfs_payload,
     save_station_status,
-    save_station_vehicle_availability,
+    record_station_changes,
     start_ingestion_run,
-    upsert_stations,
     upsert_vehicle_types,
 )
 
@@ -46,7 +43,7 @@ class GbfsIngestionSummary:
     matched_station_status_count: int
     processed_station_status_count: int
     vehicle_type_count: int
-    station_vehicle_availability_count: int
+    station_change_count: int
 
 
 def ingest_gbfs_station_feeds(
@@ -77,12 +74,10 @@ def ingest_gbfs_station_feeds(
             station.station_id for station in raw_feeds.station_status.data.stations
         }
 
-        save_raw_gbfs_payload(
-            session, raw_feeds, system_id=system_id, observed_at=observed_at
+        stations = build_stations(
+            raw_feeds, system_id=system_id, observed_at=observed_at
         )
-
-        stations = build_stations(raw_feeds, system_id=system_id)
-        upsert_stations(session, stations)
+        station_changes = record_station_changes(session, stations, system_id=system_id)
 
         vehicle_types = build_vehicle_types(raw_feeds, system_id=system_id)
         upsert_vehicle_types(session, vehicle_types)
@@ -94,11 +89,6 @@ def ingest_gbfs_station_feeds(
             observed_at=observed_at,
         )
         save_station_status(session, station_status_records)
-
-        station_vehicle_availability = build_station_vehicle_availability(
-            raw_feeds, system_id=system_id, observed_at=observed_at
-        )
-        save_station_vehicle_availability(session, station_vehicle_availability)
 
         complete_ingestion_run(
             session,
@@ -127,7 +117,7 @@ def ingest_gbfs_station_feeds(
         matched_station_status_count=len(station_ids & status_station_ids),
         processed_station_status_count=len(station_status_records),
         vehicle_type_count=len(vehicle_types),
-        station_vehicle_availability_count=len(station_vehicle_availability),
+        station_change_count=station_changes,
     )
 
 
@@ -143,7 +133,7 @@ def format_ingestion_summary(summary: GbfsIngestionSummary) -> str:
         f"Stations with matching status: {summary.matched_station_status_count}",
         f"Processed station status rows: {summary.processed_station_status_count}",
         f"Vehicle types: {summary.vehicle_type_count}",
-        f"Station vehicle availability rows: {summary.station_vehicle_availability_count}",
+        f"Station detail changes recorded: {summary.station_change_count}",
     ]
 
     return "\n".join(lines)
