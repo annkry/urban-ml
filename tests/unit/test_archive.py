@@ -1,20 +1,23 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
 import polars as pl
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from urban_ml.archive.export import (
+    _utc_date,
     day_bounds,
     days_needing_export,
     days_present,
     export_day,
     observed_day_range,
+    utc_day,
 )
 from urban_ml.archive.layout import (
     STATION_STATUS,
@@ -284,3 +287,35 @@ def test_no_start_date_means_no_floor() -> None:
         date(2026, 9, 4),
         date(2026, 9, 5),
     ]
+
+
+def test_day_bucketing_is_utc_regardless_of_postgres_session_timezone() -> None:
+    """Postgres reads date(timestamptz) in the session timezone."""
+
+    statement = select(utc_day(StationStatusRecord.observed_at, dialect="postgresql"))
+    compiled = str(
+        statement.compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+
+    assert "timezone('UTC', station_status.observed_at)" in compiled
+
+
+def test_day_bucketing_stays_plain_on_dialects_without_a_session_timezone() -> None:
+    statement = select(utc_day(StationStatusRecord.observed_at, dialect="sqlite"))
+    compiled = str(statement.compile(dialect=sqlite.dialect()))
+
+    assert "timezone" not in compiled
+    assert "date(" in compiled
+
+
+def test_observed_day_range_is_utc_whatever_zone_the_driver_returns() -> None:
+    """psycopg renders timestamptz in the session zone, so .date() on what it
+    hands back is the local day, not the UTC one."""
+
+    berlin = timezone(timedelta(hours=2))
+    late_evening_utc = datetime(2026, 9, 6, 23, 30, tzinfo=UTC)
+
+    assert _utc_date(late_evening_utc.astimezone(berlin)) == date(2026, 9, 6)
+    assert _utc_date(late_evening_utc) == date(2026, 9, 6)
