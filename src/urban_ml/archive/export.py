@@ -7,6 +7,8 @@ from typing import Literal
 import polars as pl
 from sqlalchemy import Select, func, select
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.sql.elements import ColumnElement
 
 from urban_ml.archive.layout import STATION_STATUS, STATIONS, partition_path
 from urban_ml.core.logging import get_logger
@@ -155,6 +157,16 @@ def export_day(
     return destination, written
 
 
+def utc_day(
+    column: InstrumentedAttribute[datetime], *, dialect: str
+) -> ColumnElement[date]:
+    """The UTC calendar day of a timestamp, independent of session timezone."""
+
+    if dialect == "postgresql":
+        return func.date(func.timezone("UTC", column))
+    return func.date(column)
+
+
 def observed_day_range(engine: Engine, *, table: str) -> tuple[date, date] | None:
     """Oldest and newest UTC day present for a table, for driving a backfill."""
 
@@ -168,7 +180,15 @@ def observed_day_range(engine: Engine, *, table: str) -> tuple[date, date] | Non
         newest = connection.execute(
             select(observed_at.label("hi")).order_by(observed_at.desc()).limit(1)
         ).one()
-    return row.lo.date(), newest.hi.date()
+    return _utc_date(row.lo), _utc_date(newest.hi)
+
+
+def _utc_date(moment: datetime) -> date:
+    """The UTC day of a moment the driver may have rendered in another zone."""
+
+    if moment.tzinfo is None:
+        return moment.date()
+    return moment.astimezone(UTC).date()
 
 
 def days_present(engine: Engine, *, table: str) -> set[date]:
@@ -177,7 +197,9 @@ def days_present(engine: Engine, *, table: str) -> set[date]:
     observed_at = _OBSERVED_AT[table]
     with engine.connect() as connection:
         rows = connection.execute(
-            select(func.date(observed_at).label("day")).distinct()
+            select(
+                utc_day(observed_at, dialect=engine.dialect.name).label("day")
+            ).distinct()
         ).all()
     return {
         row.day if isinstance(row.day, date) else date.fromisoformat(row.day)
