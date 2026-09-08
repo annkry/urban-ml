@@ -12,6 +12,21 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  ingest:
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "urban_ml.ingestion.loop"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      - postgres
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+
   api:
     build: .
     restart: unless-stopped

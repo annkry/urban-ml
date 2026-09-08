@@ -1,7 +1,18 @@
 from datetime import date
 from pathlib import Path
+from typing import Annotated
 
+from pydantic import BeforeValidator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _blank_is_unset(value: object) -> object:
+    """An unset GitHub Actions variable arrives as "", not as absent."""
+
+    return None if value == "" else value
+
+
+type BlankIsUnset[T] = Annotated[T | None, BeforeValidator(_blank_is_unset)]
 
 
 class Settings(BaseSettings):
@@ -32,6 +43,9 @@ class Settings(BaseSettings):
 
     # Days before this are never archived.
     archive_start_date: date | None = None
+
+    # Days of station_status to keep in the database.
+    retention_days: BlankIsUnset[int] = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -12,6 +12,7 @@ from urban_ml.archive.export import (
 )
 from urban_ml.archive.layout import ARCHIVED_TABLES, STATION_STATUS
 from urban_ml.archive.publish import archived_days, upload_partitions
+from urban_ml.archive.retention import apply_retention
 from urban_ml.core.config import settings
 from urban_ml.core.logging import configure_logging, get_logger
 from urban_ml.storage.db import engine
@@ -74,18 +75,8 @@ def _days_to_export(args: argparse.Namespace) -> list[date]:
     return missing
 
 
-def main() -> int:
-    args = _parse_args()
-
-    if not args.dry_run and not settings.hf_dataset_repo:
-        raise SystemExit("HF_DATASET_REPO is not set; nowhere to publish to.")
-    if not args.dry_run and not settings.hf_token:
-        raise SystemExit("HF_TOKEN is not set; cannot authenticate to the Hub.")
-
-    days = _days_to_export(args)
-    if not days:
-        logger.warning("No days to export.")
-        return 0
+def _export_and_publish(days: list[date], args: argparse.Namespace) -> None:
+    """Stage every table for the given days, then upload them as one commit."""
 
     logger.info("Exporting %d day(s): %s .. %s", len(days), days[0], days[-1])
 
@@ -104,7 +95,7 @@ def main() -> int:
 
         if args.dry_run:
             logger.info("Dry run; staged under %s, nothing uploaded.", staging)
-            return 0
+            return
 
         span = f"{days[0]}" if len(days) == 1 else f"{days[0]}..{days[-1]}"
         upload_partitions(
@@ -115,6 +106,32 @@ def main() -> int:
         )
 
     logger.info("Published to %s", settings.hf_dataset_repo)
+
+
+def main() -> int:
+    args = _parse_args()
+
+    if not args.dry_run and not settings.hf_dataset_repo:
+        raise SystemExit("HF_DATASET_REPO is not set; nowhere to publish to.")
+    if not args.dry_run and not settings.hf_token:
+        raise SystemExit("HF_TOKEN is not set; cannot authenticate to the Hub.")
+
+    days = _days_to_export(args)
+    if days:
+        _export_and_publish(days, args)
+    else:
+        logger.warning("No days to export.")
+
+    if args.dry_run:
+        return 0
+
+    apply_retention(
+        engine,
+        repo_id=settings.hf_dataset_repo,
+        token=settings.hf_token,
+        keep_days=settings.retention_days,
+        today=datetime.now(UTC).date(),
+    )
     return 0
 
 

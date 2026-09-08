@@ -10,11 +10,42 @@ SERVICE="${SERVICE:-urban-ml-ingest}"
 SCHEDULER_JOB="${SCHEDULER_JOB:-urban-ml-ingest-5min}"
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-urban-ml-scheduler}"
 SYSTEM_ID="${SYSTEM_ID:-bike_share_toronto}"
-IMAGE="gcr.io/${PROJECT_ID}/${SERVICE}"
+REPOSITORY="${REPOSITORY:-urban-ml}"
+IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${SERVICE}"
 
 echo "==> Enabling APIs"
 gcloud services enable run.googleapis.com cloudscheduler.googleapis.com \
-  cloudbuild.googleapis.com --project "${PROJECT_ID}"
+  cloudbuild.googleapis.com artifactregistry.googleapis.com --project "${PROJECT_ID}"
+
+echo "==> Artifact Registry repository"
+gcloud artifacts repositories describe "${REPOSITORY}" \
+  --location "${REGION}" --project "${PROJECT_ID}" >/dev/null 2>&1 || \
+  gcloud artifacts repositories create "${REPOSITORY}" \
+    --repository-format docker \
+    --location "${REGION}" \
+    --project "${PROJECT_ID}" \
+    --description "urban-ml container images"
+
+echo "==> Cleanup policy: keep 3 versions, drop untagged after a week"
+CLEANUP_POLICY="$(mktemp)"
+trap 'rm -f "${CLEANUP_POLICY}"' EXIT
+cat > "${CLEANUP_POLICY}" <<'JSON'
+[
+  {
+    "name": "delete-untagged",
+    "action": {"type": "Delete"},
+    "condition": {"tagState": "untagged", "olderThan": "7d"}
+  },
+  {
+    "name": "keep-recent",
+    "action": {"type": "Keep"},
+    "mostRecentVersions": {"keepCount": 3}
+  }
+]
+JSON
+gcloud artifacts repositories set-cleanup-policies "${REPOSITORY}" \
+  --location "${REGION}" --project "${PROJECT_ID}" \
+  --policy "${CLEANUP_POLICY}" --no-dry-run >/dev/null
 
 echo "==> Building image"
 gcloud builds submit --tag "${IMAGE}" --project "${PROJECT_ID}" .

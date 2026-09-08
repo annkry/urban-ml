@@ -38,6 +38,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          RETENTION_DAYS: ${{ vars.RETENTION_DAYS }}
         run: |
           uv run python scripts/archive_to_hub.py \
             ${{ inputs.backfill && '--backfill' || '' }}
