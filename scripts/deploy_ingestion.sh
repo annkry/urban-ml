@@ -26,7 +26,7 @@ gcloud artifacts repositories describe "${REPOSITORY}" \
     --project "${PROJECT_ID}" \
     --description "urban-ml container images"
 
-echo "==> Cleanup policy: keep 3 versions, drop untagged after a week"
+echo "==> Cleanup policy: keep the live image and one to roll back to"
 CLEANUP_POLICY="$(mktemp)"
 trap 'rm -f "${CLEANUP_POLICY}"' EXIT
 cat > "${CLEANUP_POLICY}" <<'JSON'
@@ -39,7 +39,7 @@ cat > "${CLEANUP_POLICY}" <<'JSON'
   {
     "name": "keep-recent",
     "action": {"type": "Keep"},
-    "mostRecentVersions": {"keepCount": 3}
+    "mostRecentVersions": {"keepCount": 2}
   }
 ]
 JSON
