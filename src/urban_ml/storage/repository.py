@@ -235,6 +235,16 @@ def fetch_recent_station_status(
     return session.scalars(stmt).all()
 
 
+def latest_status_observed_at(session: Session, *, system_id: str) -> datetime | None:
+    """Timestamp of the newest status reading, or None if there are none."""
+
+    stmt = select(func.max(StationStatusRecord.observed_at)).where(
+        StationStatusRecord.system_id == system_id
+    )
+    latest: datetime | None = session.scalar(stmt)
+    return latest
+
+
 def station_status_history_query(
     *,
     system_id: str,
