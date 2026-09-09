@@ -14,7 +14,7 @@ esac
 : "${PROJECT_ID:?set PROJECT_ID}"
 : "${DATABASE_URL:?set DATABASE_URL (the Neon connection string)}"
 
-REGION="${REGION:-us-central1}"
+REGION="${REGION:-us-east1}"
 REPOSITORY="${REPOSITORY:-urban-ml}"
 API_SERVICE="${API_SERVICE:-urban-ml-api}"
 INGEST_SERVICE="${INGEST_SERVICE:-urban-ml-ingest}"
