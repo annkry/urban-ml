@@ -16,8 +16,8 @@ from urban_ml.storage.models import Station, StationStatusRecord
 
 logger = get_logger(__name__)
 
-_COMPRESSION: Literal["zstd"] = "zstd"
-_COMPRESSION_LEVEL = 9
+COMPRESSION: Literal["zstd"] = "zstd"
+COMPRESSION_LEVEL = 9
 
 _EXPORT_COLUMNS = {
     STATION_STATUS: (
@@ -107,6 +107,12 @@ def read_day(engine: Engine, *, table: str, day: date) -> pl.DataFrame:
         )
 
 
+def parquet_schema(table: str) -> dict[str, pl.DataType]:
+    """The archive's declared dtypes for a table, in column order."""
+
+    return dict(_PARQUET_SCHEMA[table])
+
+
 def conform(frame: pl.DataFrame, *, table: str) -> pl.DataFrame:
     """Cast a frame to the archive's declared dtypes and column order."""
 
@@ -117,7 +123,7 @@ def conform(frame: pl.DataFrame, *, table: str) -> pl.DataFrame:
 def write_parquet(frame: pl.DataFrame, destination: Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     frame.write_parquet(
-        destination, compression=_COMPRESSION, compression_level=_COMPRESSION_LEVEL
+        destination, compression=COMPRESSION, compression_level=COMPRESSION_LEVEL
     )
     return destination
 

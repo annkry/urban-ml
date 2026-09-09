@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     # Database settings
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5433/urban_ml"
 
+    # Object storage staging.
+    gcs_bucket: str = ""
+
     # ML / MLflow settings
     mlflow_tracking_uri: str = "sqlite:///mlflow.db"
     model_dir: Path = Path("models/current")

@@ -7,14 +7,26 @@ from fastapi.testclient import TestClient
 
 from urban_ml.api import ingest_app as module
 from urban_ml.ingestion.gbfs_client import GbfsClientError
+from urban_ml.ingestion.gbfs_ingest import GbfsIngestionSummary
 from urban_ml.processing.gbfs_transform import GbfsTransformError
 
 
-class _Summary:
-    system_id = "toronto"
-    processed_station_status_count = 3
-    station_change_count = 1
-    station_count = 3
+def _summary(*, snapshot_staged: bool = True) -> GbfsIngestionSummary:
+    """The real summary type, not a structural stand-in."""
+
+    return GbfsIngestionSummary(
+        discovery_url="https://example.com/gbfs/3/gbfs",
+        system_id="toronto",
+        station_information_last_updated="2026-09-09T12:18:02+00:00",
+        station_status_last_updated="2026-09-09T12:18:02+00:00",
+        station_count=3,
+        status_count=3,
+        matched_station_status_count=3,
+        processed_station_status_count=3,
+        vehicle_type_count=2,
+        station_change_count=1,
+        snapshot_staged=snapshot_staged,
+    )
 
 
 @pytest.fixture
@@ -40,7 +52,7 @@ def test_ingest_reports_what_it_wrote(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        module, "ingest_gbfs_station_feeds", lambda *_a, **_k: _Summary()
+        module, "ingest_gbfs_station_feeds", lambda *_a, **_k: _summary()
     )
 
     response = client.post("/ingest")
@@ -51,7 +63,25 @@ def test_ingest_reports_what_it_wrote(
         "station_status_rows": 3,
         "station_detail_changes": 1,
         "stations_discovered": 3,
+        "snapshot_staged": True,
     }
+
+
+def test_a_staging_failure_is_reported_without_failing_the_tick(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The database is authoritative while staging is a shadow write."""
+
+    monkeypatch.setattr(
+        module,
+        "ingest_gbfs_station_feeds",
+        lambda *_a, **_k: _summary(snapshot_staged=False),
+    )
+
+    response = client.post("/ingest")
+
+    assert response.status_code == 200
+    assert response.json()["snapshot_staged"] is False
 
 
 @pytest.mark.parametrize("error", [GbfsClientError, GbfsTransformError])

@@ -20,6 +20,7 @@ INGEST_SERVICE="${INGEST_SERVICE:-urban-ml-ingest}"
 SCHEDULER_JOB="${SCHEDULER_JOB:-urban-ml-ingest-5min}"
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-urban-ml-scheduler}"
 SECRET_NAME="${SECRET_NAME:-urban-ml-database-url}"
+BUCKET="${BUCKET:-${PROJECT_ID}-urban-ml-staging}"
 
 SYSTEM_ID="${SYSTEM_ID:-bike_share_toronto}"
 
@@ -46,7 +47,7 @@ fi
 echo "==> Enabling APIs"
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
   artifactregistry.googleapis.com cloudscheduler.googleapis.com \
-  secretmanager.googleapis.com \
+  secretmanager.googleapis.com storage.googleapis.com \
   --project "${PROJECT_ID}"
 
 echo "==> Database URL in Secret Manager"
@@ -78,6 +79,23 @@ RUNTIME_SA="${RUNTIME_SERVICE_ACCOUNT:-${PROJECT_NUMBER}-compute@developer.gserv
 gcloud secrets add-iam-policy-binding "${SECRET_NAME}" \
   --member "serviceAccount:${RUNTIME_SA}" \
   --role roles/secretmanager.secretAccessor \
+  --project "${PROJECT_ID}" >/dev/null
+
+echo "==> Staging bucket"
+if ! gcloud storage buckets describe "gs://${BUCKET}" \
+  --project "${PROJECT_ID}" >/dev/null 2>&1; then
+  gcloud storage buckets create "gs://${BUCKET}" \
+    --project "${PROJECT_ID}" \
+    --location "${REGION}" \
+    --uniform-bucket-level-access
+  echo "    created gs://${BUCKET}"
+else
+  echo "    gs://${BUCKET} already exists"
+fi
+
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET}" \
+  --member "serviceAccount:${RUNTIME_SA}" \
+  --role roles/storage.objectUser \
   --project "${PROJECT_ID}" >/dev/null
 
 echo "==> Artifact Registry repository"
@@ -151,7 +169,7 @@ deploy_ingest() {
     --max-instances 1 \
     --timeout 120 \
     --set-secrets "DATABASE_URL=${SECRET_NAME}:latest" \
-    --set-env-vars "SYSTEM_ID=${SYSTEM_ID},APP_ENV=production"
+    --set-env-vars "SYSTEM_ID=${SYSTEM_ID},APP_ENV=production,GCS_BUCKET=${BUCKET}"
 }
 
 ensure_scheduler() {

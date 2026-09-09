@@ -11,6 +11,7 @@ requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.13",
     "fastapi>=0.139.0",
+    "google-cloud-storage>=2.19",
     "lightgbm>=4.7.0",
     "numpy>=2.1",
     "pandas>=2.2",
@@ -39,5 +40,5 @@ dev = [
 where = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["lightgbm.*", "mlflow.*", "pandas.*"]
+module = ["google.*", "lightgbm.*", "mlflow.*", "pandas.*"]
 ignore_missing_imports = true
