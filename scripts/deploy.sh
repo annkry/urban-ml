@@ -12,7 +12,6 @@ case "${TARGET}" in
 esac
 
 : "${PROJECT_ID:?set PROJECT_ID}"
-: "${DATABASE_URL:?set DATABASE_URL (the Neon connection string)}"
 
 REGION="${REGION:-us-east1}"
 REPOSITORY="${REPOSITORY:-urban-ml}"
@@ -20,6 +19,7 @@ API_SERVICE="${API_SERVICE:-urban-ml-api}"
 INGEST_SERVICE="${INGEST_SERVICE:-urban-ml-ingest}"
 SCHEDULER_JOB="${SCHEDULER_JOB:-urban-ml-ingest-5min}"
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-urban-ml-scheduler}"
+SECRET_NAME="${SECRET_NAME:-urban-ml-database-url}"
 
 SYSTEM_ID="${SYSTEM_ID:-bike_share_toronto}"
 
@@ -46,7 +46,39 @@ fi
 echo "==> Enabling APIs"
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
   artifactregistry.googleapis.com cloudscheduler.googleapis.com \
+  secretmanager.googleapis.com \
   --project "${PROJECT_ID}"
+
+echo "==> Database URL in Secret Manager"
+if ! gcloud secrets describe "${SECRET_NAME}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
+  : "${DATABASE_URL:?secret ${SECRET_NAME} does not exist yet -- set DATABASE_URL once to create it}"
+  gcloud secrets create "${SECRET_NAME}" \
+    --replication-policy automatic --project "${PROJECT_ID}" >/dev/null
+  printf '%s' "${DATABASE_URL}" |
+    gcloud secrets versions add "${SECRET_NAME}" \
+      --data-file=- --project "${PROJECT_ID}" >/dev/null
+  echo "    created ${SECRET_NAME}"
+elif [[ -n "${DATABASE_URL:-}" ]]; then
+  CURRENT="$(gcloud secrets versions access latest --secret "${SECRET_NAME}" \
+    --project "${PROJECT_ID}" 2>/dev/null || true)"
+  if [[ "${CURRENT}" != "${DATABASE_URL}" ]]; then
+    printf '%s' "${DATABASE_URL}" |
+      gcloud secrets versions add "${SECRET_NAME}" \
+        --data-file=- --project "${PROJECT_ID}" >/dev/null
+    echo "    added a new version of ${SECRET_NAME}"
+  else
+    echo "    unchanged"
+  fi
+else
+  echo "    using the stored value"
+fi
+
+PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format 'value(projectNumber)')"
+RUNTIME_SA="${RUNTIME_SERVICE_ACCOUNT:-${PROJECT_NUMBER}-compute@developer.gserviceaccount.com}"
+gcloud secrets add-iam-policy-binding "${SECRET_NAME}" \
+  --member "serviceAccount:${RUNTIME_SA}" \
+  --role roles/secretmanager.secretAccessor \
+  --project "${PROJECT_ID}" >/dev/null
 
 echo "==> Artifact Registry repository"
 gcloud artifacts repositories describe "${REPOSITORY}" \
@@ -99,7 +131,8 @@ deploy_api() {
     --concurrency 40 \
     --timeout 60 \
     --startup-probe "httpGet.path=/health,initialDelaySeconds=0,periodSeconds=5,timeoutSeconds=5,failureThreshold=12" \
-    --set-env-vars "DATABASE_URL=${DATABASE_URL},SYSTEM_ID=${SYSTEM_ID},MODEL_DIR=/app/models/current,APP_ENV=production"
+    --set-secrets "DATABASE_URL=${SECRET_NAME}:latest" \
+    --set-env-vars "SYSTEM_ID=${SYSTEM_ID},MODEL_DIR=/app/models/current,APP_ENV=production"
 }
 
 deploy_ingest() {
@@ -117,7 +150,8 @@ deploy_ingest() {
     --min-instances 0 \
     --max-instances 1 \
     --timeout 120 \
-    --set-env-vars "DATABASE_URL=${DATABASE_URL},SYSTEM_ID=${SYSTEM_ID},APP_ENV=production"
+    --set-secrets "DATABASE_URL=${SECRET_NAME}:latest" \
+    --set-env-vars "SYSTEM_ID=${SYSTEM_ID},APP_ENV=production"
 }
 
 ensure_scheduler() {
