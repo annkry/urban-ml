@@ -21,6 +21,8 @@ from urban_ml.processing.gbfs_transform import (
     build_stations,
     build_vehicle_types,
 )
+from urban_ml.staging.objects import ObjectStore, store_from_settings
+from urban_ml.staging.snapshots import stage_cycle_or_log
 from urban_ml.storage.db import get_session
 from urban_ml.storage.repository import (
     complete_ingestion_run,
@@ -44,6 +46,7 @@ class GbfsIngestionSummary:
     processed_station_status_count: int
     vehicle_type_count: int
     station_change_count: int
+    snapshot_staged: bool = False
 
 
 def ingest_gbfs_station_feeds(
@@ -52,6 +55,7 @@ def ingest_gbfs_station_feeds(
     timeout_seconds: float,
     session: Session,
     json_fetcher: JsonFetcher = fetch_json_with_retry,
+    object_store: ObjectStore | None = None,
 ) -> GbfsIngestionSummary:
     """Fetch, validate, and persist GBFS station feeds to the database."""
 
@@ -107,6 +111,14 @@ def ingest_gbfs_station_feeds(
         )
         raise
 
+    snapshot_staged = False
+    if object_store is not None:
+        snapshot_staged = stage_cycle_or_log(
+            object_store,
+            records=station_status_records,
+            observed_at=observed_at,
+        )
+
     return GbfsIngestionSummary(
         discovery_url=discovery_url,
         system_id=system_id,
@@ -118,6 +130,7 @@ def ingest_gbfs_station_feeds(
         processed_station_status_count=len(station_status_records),
         vehicle_type_count=len(vehicle_types),
         station_change_count=station_changes,
+        snapshot_staged=snapshot_staged,
     )
 
 
@@ -134,6 +147,7 @@ def format_ingestion_summary(summary: GbfsIngestionSummary) -> str:
         f"Processed station status rows: {summary.processed_station_status_count}",
         f"Vehicle types: {summary.vehicle_type_count}",
         f"Station detail changes recorded: {summary.station_change_count}",
+        f"Snapshot staged to object storage: {summary.snapshot_staged}",
     ]
 
     return "\n".join(lines)
@@ -170,6 +184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.discovery_url,
                 timeout_seconds=args.timeout_seconds,
                 session=session,
+                object_store=store_from_settings(),
             )
     except (
         GbfsClientError,

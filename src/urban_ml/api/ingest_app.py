@@ -11,12 +11,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from urban_ml.ingestion.gbfs_client import GbfsClientError
 from urban_ml.ingestion.gbfs_ingest import ingest_gbfs_station_feeds
 from urban_ml.processing.gbfs_transform import GbfsTransformError
+from urban_ml.staging.objects import store_from_settings
 from urban_ml.storage.db import get_session
 
 configure_logging()
 logger = get_logger(__name__)
 
 app = FastAPI(title=f"{settings.app_name} ingestion", version="0.1.0")
+
+object_store = store_from_settings()
+if object_store is None:
+    logger.warning("GCS_BUCKET is not set; snapshots will not be staged")
 
 
 @app.get("/health")
@@ -47,19 +52,22 @@ def ingest() -> dict[str, Any]:
                 settings.gbfs_discovery_url,
                 timeout_seconds=settings.timeout_seconds,
                 session=session,
+                object_store=object_store,
             )
     except (GbfsClientError, GbfsTransformError, SQLAlchemyError) as exc:
         logger.exception("Ingestion failed")
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     logger.info(
-        "Ingested %d station status rows (%d station detail changes)",
+        "Ingested %d station status rows (%d station detail changes, staged=%s)",
         summary.processed_station_status_count,
         summary.station_change_count,
+        summary.snapshot_staged,
     )
     return {
         "system_id": summary.system_id,
         "station_status_rows": summary.processed_station_status_count,
         "station_detail_changes": summary.station_change_count,
         "stations_discovered": summary.station_count,
+        "snapshot_staged": summary.snapshot_staged,
     }
