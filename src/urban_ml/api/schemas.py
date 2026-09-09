@@ -13,3 +13,27 @@ class PredictionResponse(BaseModel):
     last_observed_at: datetime
     last_observed_num_vehicles_available: int
     model_run_id: str
+
+
+class HealthResponse(BaseModel):
+    """Liveness. `model_loaded` is the part worth reading: a process that
+    holds no model can never answer /predict."""
+
+    status: str
+    service: str
+    environment: str
+    model_loaded: bool
+    model_run_id: str | None
+
+
+class ReadinessResponse(BaseModel):
+    """Whether this process can actually serve a prediction right now."""
+
+    status: str
+    model_loaded: bool
+    model_run_id: str | None
+    database_reachable: bool
+    latest_observed_at: datetime | None
+    data_age_seconds: float | None
+    max_data_age_seconds: float
+    data_fresh: bool

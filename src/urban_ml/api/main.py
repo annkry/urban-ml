@@ -1,11 +1,16 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from urban_ml.api.schemas import PredictionResponse
+from urban_ml.api.schemas import (
+    HealthResponse,
+    PredictionResponse,
+    ReadinessResponse,
+)
 from urban_ml.core.config import settings
 from urban_ml.core.logging import configure_logging, get_logger
 from urban_ml.modeling.artifacts import (
@@ -15,12 +20,17 @@ from urban_ml.modeling.artifacts import (
     model_artifacts_exist,
 )
 from urban_ml.modeling.predict import (
+    LOOKBACK_MINUTES,
     InsufficientHistoryError,
     build_feature_row,
     predict_one,
 )
 from urban_ml.storage.db import get_db, get_session
-from urban_ml.storage.repository import get_station, list_system_ids
+from urban_ml.storage.repository import (
+    get_station,
+    latest_status_observed_at,
+    list_system_ids,
+)
 
 configure_logging()
 logger = get_logger(__name__)
@@ -78,13 +88,76 @@ app = FastAPI(
 )
 
 
-@app.get("/health")
-def health_check() -> dict[str, str]:
-    return {
-        "status": "ok",
-        "service": settings.app_name,
-        "environment": settings.app_env,
-    }
+_MAX_DATA_AGE = timedelta(minutes=LOOKBACK_MINUTES)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """SQLite (the test backend) returns naive datetimes for a timezone-aware
+    column; Postgres returns aware ones."""
+
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+@app.get("/health", response_model=HealthResponse)
+def health_check(request: Request, response: Response) -> HealthResponse:
+    """Liveness. Deliberately touches nothing external, for the same reason
+    the ingestion service's /health doesn't: Cloud Run probes this on every
+    cold start, and a check that queried the database would fail while a
+    scale-to-zero Neon was still waking."""
+
+    model = getattr(request.app.state, "model", None)
+    if model is None:
+        response.status_code = 503
+
+    return HealthResponse(
+        status="ok" if model is not None else "no_model",
+        service=settings.app_name,
+        environment=settings.app_env,
+        model_loaded=model is not None,
+        model_run_id=getattr(request.app.state, "model_run_id", None),
+    )
+
+
+@app.get("/ready", response_model=ReadinessResponse)
+def readiness_check(
+    request: Request, response: Response, session: Session = Depends(get_db)
+) -> ReadinessResponse:
+    """Whether a prediction could actually be served right now: model loaded,
+    database reachable, and data fresh enough to build features from."""
+
+    model = getattr(request.app.state, "model", None)
+    system_id = getattr(request.app.state, "system_id", None)
+
+    latest_observed_at: datetime | None = None
+    database_reachable = True
+    try:
+        if system_id is not None:
+            latest_observed_at = latest_status_observed_at(session, system_id=system_id)
+    except SQLAlchemyError:
+        logger.exception("Readiness check could not reach the database")
+        database_reachable = False
+
+    age_seconds: float | None = None
+    if latest_observed_at is not None:
+        age_seconds = (datetime.now(UTC) - _as_utc(latest_observed_at)).total_seconds()
+
+    data_fresh = (
+        age_seconds is not None and age_seconds <= _MAX_DATA_AGE.total_seconds()
+    )
+    ready = model is not None and database_reachable and data_fresh
+    if not ready:
+        response.status_code = 503
+
+    return ReadinessResponse(
+        status="ready" if ready else "not_ready",
+        model_loaded=model is not None,
+        model_run_id=getattr(request.app.state, "model_run_id", None),
+        database_reachable=database_reachable,
+        latest_observed_at=latest_observed_at,
+        data_age_seconds=age_seconds,
+        max_data_age_seconds=_MAX_DATA_AGE.total_seconds(),
+        data_fresh=data_fresh,
+    )
 
 
 @app.get("/predict/{station_id}", response_model=PredictionResponse)
