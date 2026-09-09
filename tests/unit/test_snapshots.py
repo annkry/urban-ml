@@ -7,7 +7,9 @@ from zoneinfo import ZoneInfo
 import polars as pl
 import pytest
 
-from urban_ml.archive.layout import STATION_STATUS
+from urban_ml.archive.export import parquet_schema
+from urban_ml.archive.layout import STATION_STATUS, STATIONS
+from urban_ml.domain.station import Station
 from urban_ml.domain.station_status import StationStatus
 from urban_ml.modeling.predict import LOOKBACK_MINUTES
 from urban_ml.staging.objects import (
@@ -16,14 +18,17 @@ from urban_ml.staging.objects import (
     ObjectStoreError,
 )
 from urban_ml.staging.snapshots import (
-    RECENT_KEY,
     RECENT_WINDOW_MINUTES,
+    STATION_STATUS_KEY,
+    STATIONS_KEY,
     covers_lookback,
     history_span,
-    read_recent,
+    read_station_status,
+    read_stations,
     snapshot_key,
     stage_cycle,
     stage_cycle_or_log,
+    stations_frame,
     status_frame,
     trim_to_window,
     update_recent_window,
@@ -50,6 +55,24 @@ def _cycle(observed_at: datetime, *, stations: int = 2) -> list[StationStatus]:
         _record(f"station-{index}", observed_at, vehicles=index)
         for index in range(stations)
     ]
+
+
+def _station(station_id: str, observed_at: datetime, *, capacity: int = 20) -> Station:
+    return Station(
+        system_id=SYSTEM_ID,
+        station_id=station_id,
+        station_name=f"Name {station_id}",
+        address="1 Example St",
+        lat=43.65,
+        lon=-79.38,
+        capacity=capacity,
+        is_charging_station=False,
+        observed_at=observed_at,
+    )
+
+
+def _stations(observed_at: datetime, *, count: int = 2) -> list[Station]:
+    return [_station(f"station-{index}", observed_at) for index in range(count)]
 
 
 @pytest.fixture
@@ -98,12 +121,18 @@ def test_snapshot_partition_matches_the_rows_it_contains(
 
     observed_at = datetime(2026, 9, 9, 23, 59, 55, tzinfo=UTC)
 
-    key = stage_cycle(store, records=_cycle(observed_at), observed_at=observed_at)
+    staged = stage_cycle(
+        store,
+        status_records=_cycle(observed_at),
+        station_records=_stations(observed_at),
+        observed_at=observed_at,
+    )
 
-    assert key is not None
-    assert "date=2026-09-09" in key
-    staged = pl.read_parquet(store.get(key))
-    assert staged["observed_at"].dt.date().unique().to_list() == [observed_at.date()]
+    assert staged is not None
+    for key in (staged.station_status_key, staged.stations_key):
+        assert "date=2026-09-09" in key
+        rows = pl.read_parquet(store.get(key))
+        assert rows["observed_at"].dt.date().unique().to_list() == [observed_at.date()]
 
 
 # --- the 90-minute serving requirement -------------------------------------
@@ -191,21 +220,21 @@ def test_update_is_idempotent_for_a_retried_delivery(
     assert window.height == rows.height
 
 
-def test_read_recent_returns_an_empty_typed_frame_before_the_first_write(
+def test_read_station_status_returns_an_empty_typed_frame_before_the_first_write(
     store: LocalObjectStore,
 ) -> None:
-    window = read_recent(store)
+    window = read_station_status(store)
 
     assert window.is_empty()
     assert "observed_at" in window.columns
 
 
-def test_read_recent_recovers_from_an_unreadable_window(
+def test_read_station_status_recovers_from_an_unreadable_window(
     store: LocalObjectStore,
 ) -> None:
-    store.put(RECENT_KEY, b"not parquet at all")
+    store.put(STATION_STATUS_KEY, b"not parquet at all")
 
-    assert read_recent(store).is_empty()
+    assert read_station_status(store).is_empty()
 
 
 def test_staged_rows_round_trip_through_the_archive_schema(
@@ -214,11 +243,156 @@ def test_staged_rows_round_trip_through_the_archive_schema(
     moment = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
     records = _cycle(moment, stations=3)
 
-    stage_cycle(store, records=records, observed_at=moment)
-    window = read_recent(store)
+    stage_cycle(
+        store,
+        status_records=records,
+        station_records=_stations(moment, count=3),
+        observed_at=moment,
+    )
+    window = read_station_status(store)
 
     assert window.height == 3
     assert window.schema == status_frame(records).schema
+
+
+def test_both_tables_are_staged_whole_under_snapshots(
+    store: LocalObjectStore,
+) -> None:
+    """serving/ holds the rolling window; snapshots/ holds full rows."""
+
+    moment = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+
+    staged = stage_cycle(
+        store,
+        status_records=_cycle(moment, stations=3),
+        station_records=_stations(moment, count=3),
+        observed_at=moment,
+    )
+
+    assert staged is not None
+    assert staged.station_status_key.startswith("snapshots/station_status/")
+    assert staged.stations_key.startswith("snapshots/stations/")
+    assert staged.station_status_rows == 3
+    assert staged.stations_rows == 3
+    assert pl.read_parquet(store.get(staged.stations_key)).height == 3
+
+
+def test_staged_stations_match_the_archive_schema(store: LocalObjectStore) -> None:
+    """The daily export concatenates these; a drifting schema fails there."""
+
+    moment = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+    records = _stations(moment, count=2)
+
+    staged = stage_cycle(
+        store,
+        status_records=_cycle(moment),
+        station_records=records,
+        observed_at=moment,
+    )
+
+    assert staged is not None
+    written = pl.read_parquet(store.get(staged.stations_key))
+    assert written.schema == stations_frame(records).schema
+    assert written.columns == list(parquet_schema(STATIONS))
+
+
+def test_the_serving_window_holds_only_station_status(
+    store: LocalObjectStore,
+) -> None:
+    """Capacity lives in its own serving file, not folded into the window."""
+
+    moment = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+
+    stage_cycle(
+        store,
+        status_records=_cycle(moment),
+        station_records=_stations(moment),
+        observed_at=moment,
+    )
+
+    assert read_station_status(store).columns == list(parquet_schema(STATION_STATUS))
+    assert read_stations(store).columns == list(parquet_schema(STATIONS))
+
+
+def test_serving_stations_are_published_for_predict(
+    store: LocalObjectStore,
+) -> None:
+    """A fixed key, so serving never lists the bucket to find the newest."""
+
+    moment = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+
+    stage_cycle(
+        store,
+        status_records=_cycle(moment),
+        station_records=_stations(moment, count=3),
+        observed_at=moment,
+    )
+
+    stations = read_stations(store)
+    assert store.exists(STATIONS_KEY)
+    assert stations.height == 3
+    assert stations.select(["station_id", "capacity"]).to_dicts() == [
+        {"station_id": "station-0", "capacity": 20},
+        {"station_id": "station-1", "capacity": 20},
+        {"station_id": "station-2", "capacity": 20},
+    ]
+
+
+def test_serving_stations_never_disagree_with_the_snapshot(
+    store: LocalObjectStore,
+) -> None:
+    """Both come from one serialisation, so they cannot drift apart."""
+
+    moment = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+
+    staged = stage_cycle(
+        store,
+        status_records=_cycle(moment),
+        station_records=_stations(moment, count=3),
+        observed_at=moment,
+    )
+
+    assert staged is not None
+    assert store.get(STATIONS_KEY) == store.get(staged.stations_key)
+
+
+def test_serving_stations_track_a_capacity_change(store: LocalObjectStore) -> None:
+    """Overwritten every cycle, so a re-signed station is current next tick."""
+
+    first = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+    stage_cycle(
+        store,
+        status_records=_cycle(first),
+        station_records=[_station("station-0", first, capacity=20)],
+        observed_at=first,
+    )
+
+    later = first + timedelta(minutes=5)
+    stage_cycle(
+        store,
+        status_records=_cycle(later),
+        station_records=[_station("station-0", later, capacity=31)],
+        observed_at=later,
+    )
+
+    assert read_stations(store)["capacity"].to_list() == [31]
+
+
+def test_read_stations_returns_an_empty_typed_frame_before_the_first_write(
+    store: LocalObjectStore,
+) -> None:
+    stations = read_stations(store)
+
+    assert stations.is_empty()
+    assert "capacity" in stations.columns
+
+
+def test_read_stations_recovers_from_an_unreadable_file(
+    store: LocalObjectStore,
+) -> None:
+    store.put(STATIONS_KEY, b"not parquet at all")
+
+    assert read_stations(store).is_empty()
 
 
 def test_stage_cycle_writes_the_durable_snapshot_before_the_window(
@@ -226,17 +400,30 @@ def test_stage_cycle_writes_the_durable_snapshot_before_the_window(
 ) -> None:
     moment = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
 
-    key = stage_cycle(store, records=_cycle(moment), observed_at=moment)
+    staged = stage_cycle(
+        store,
+        status_records=_cycle(moment),
+        station_records=_stations(moment),
+        observed_at=moment,
+    )
 
-    assert key is not None
-    assert store.exists(key)
-    assert store.exists(RECENT_KEY)
+    assert staged is not None
+    assert store.exists(staged.station_status_key)
+    assert store.exists(staged.stations_key)
+    assert store.exists(STATION_STATUS_KEY)
 
 
 def test_stage_cycle_with_no_records_writes_nothing(store: LocalObjectStore) -> None:
     moment = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
 
-    assert stage_cycle(store, records=[], observed_at=moment) is None
+    staged = stage_cycle(
+        store,
+        status_records=[],
+        station_records=_stations(moment),
+        observed_at=moment,
+    )
+
+    assert staged is None
     assert store.list_keys("") == []
 
 
@@ -268,7 +455,12 @@ def test_store_outage_does_not_fail_the_ingestion_run() -> None:
     moment = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
 
     assert (
-        stage_cycle_or_log(_BrokenStore(), records=_cycle(moment), observed_at=moment)
+        stage_cycle_or_log(
+            _BrokenStore(),
+            status_records=_cycle(moment),
+            station_records=_stations(moment),
+            observed_at=moment,
+        )
         is False
     )
 
@@ -279,6 +471,7 @@ def test_a_bug_in_staging_is_not_swallowed() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         stage_cycle_or_log(
             _BrokenStore(),
-            records=_cycle(datetime(2026, 9, 9, 12, 0, tzinfo=UTC)),
+            status_records=_cycle(datetime(2026, 9, 9, 12, 0, tzinfo=UTC)),
+            station_records=_stations(datetime(2026, 9, 9, 12, 0, tzinfo=UTC)),
             observed_at=datetime(2026, 9, 9, 12, 0),
         )

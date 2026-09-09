@@ -115,7 +115,8 @@ def ingest_gbfs_station_feeds(
     if object_store is not None:
         snapshot_staged = stage_cycle_or_log(
             object_store,
-            records=station_status_records,
+            status_records=station_status_records,
+            station_records=stations,
             observed_at=observed_at,
         )
 
