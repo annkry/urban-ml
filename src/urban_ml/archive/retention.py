@@ -7,9 +7,11 @@ from sqlalchemy import delete
 from sqlalchemy.engine import Engine
 
 from urban_ml.archive.export import day_bounds, days_present
-from urban_ml.archive.layout import STATION_STATUS
+from urban_ml.archive.layout import ARCHIVED_TABLES, STATION_STATUS
 from urban_ml.archive.publish import archived_days
+from urban_ml.archive.staged import days_present_in_bucket, delete_staged_day
 from urban_ml.core.logging import get_logger
+from urban_ml.staging.objects import ObjectStore
 from urban_ml.storage.models import StationStatusRecord
 
 logger = get_logger(__name__)
@@ -96,6 +98,48 @@ def apply_retention(
     removed = trim_days(engine, days=days)
     logger.info(
         "Retention: removed %d rows across %d day(s), %s .. %s",
+        removed,
+        len(days),
+        days[0],
+        days[-1],
+    )
+    return removed
+
+
+def trim_staged_days(store: ObjectStore, *, days: Sequence[date]) -> int:
+    """Delete every staged object for the given days, returning the count."""
+
+    removed = 0
+    for day in days:
+        for table in ARCHIVED_TABLES:
+            removed += delete_staged_day(store, table=table, day=day)
+    return removed
+
+
+def apply_staged_retention(
+    store: ObjectStore,
+    *,
+    repo_id: str,
+    token: str | None,
+    keep_days: int | None,
+    today: date,
+) -> int:
+    """Trim staged days the archive is confirmed to hold. No-op when unset."""
+
+    if keep_days is None:
+        return 0
+
+    archived = archived_days(repo_id, table=STATION_STATUS, token=token)
+    present = days_present_in_bucket(store)
+    days = days_safe_to_trim(present, archived, today=today, keep_days=keep_days)
+
+    if not days:
+        logger.info("Retention: no staged day is older than %d days", keep_days)
+        return 0
+
+    removed = trim_staged_days(store, days=days)
+    logger.info(
+        "Retention: removed %d staged objects across %d day(s), %s .. %s",
         removed,
         len(days),
         days[0],
