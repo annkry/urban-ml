@@ -179,6 +179,13 @@ def history_span(frame: pl.DataFrame) -> timedelta | None:
     return newest - oldest
 
 
+def newest_observed_at(frame: pl.DataFrame) -> datetime | None:
+    """The most recent observation in a frame, or None when it is empty."""
+
+    bounds = _observed_bounds(frame)
+    return None if bounds is None else bounds[1]
+
+
 def covers_lookback(frame: pl.DataFrame, *, lookback_minutes: int) -> bool:
     """Whether the window holds enough history to build a full feature row."""
 

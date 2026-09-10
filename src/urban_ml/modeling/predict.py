@@ -5,12 +5,10 @@ from datetime import UTC, datetime, timedelta
 import lightgbm as lgb
 import numpy as np
 import polars as pl
-from sqlalchemy.orm import Session
 
-from urban_ml.features.build_features import compute_features
+from urban_ml.domain.station import Station
+from urban_ml.features.build_features import RAW_COLUMNS, compute_features
 from urban_ml.modeling.encoding import encode_station_id, to_model_frame
-from urban_ml.storage.models import Station
-from urban_ml.storage.repository import fetch_recent_station_status
 
 LOOKBACK_MINUTES = 90
 
@@ -20,36 +18,24 @@ class InsufficientHistoryError(Exception):
 
 
 def build_feature_row(
-    session: Session,
+    window: pl.DataFrame,
     *,
     system_id: str,
     station_id: str,
     station: Station,
 ) -> pl.DataFrame:
-    """Fetch recent history for one station and run it through the exact
-    same compute_features() used in training — this IS train/serve parity,
-    not a re-implementation of it."""
+    """Slice one station's recent history out of the serving window and run it
+    through the exact same compute_features() used in training."""
 
     since = datetime.now(UTC) - timedelta(minutes=LOOKBACK_MINUTES)
-    records = fetch_recent_station_status(
-        session, system_id=system_id, station_id=station_id, since=since
-    )
-    if not records:
+    raw = window.filter(
+        (pl.col("system_id") == system_id)
+        & (pl.col("station_id") == station_id)
+        & (pl.col("observed_at") >= since)
+    ).select(RAW_COLUMNS)
+    if raw.is_empty():
         raise InsufficientHistoryError(station_id)
 
-    raw = pl.DataFrame(
-        {
-            "station_id": [record.station_id for record in records],
-            "observed_at": [record.observed_at for record in records],
-            "num_vehicles_available": [
-                record.num_vehicles_available for record in records
-            ],
-            "num_docks_available": [record.num_docks_available for record in records],
-            "is_installed": [record.is_installed for record in records],
-            "is_renting": [record.is_renting for record in records],
-            "is_returning": [record.is_returning for record in records],
-        }
-    )
     stations = pl.DataFrame(
         {"station_id": [station.station_id], "capacity": [station.capacity]},
         schema={"station_id": pl.String, "capacity": pl.Int64},
