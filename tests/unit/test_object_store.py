@@ -74,6 +74,18 @@ def test_list_keys_filters_by_prefix_and_sorts(store: LocalObjectStore) -> None:
     ]
 
 
+def test_list_keys_works_when_the_root_is_a_relative_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scripts point the store at a directory like "gcp_storage"."""
+
+    monkeypatch.chdir(tmp_path)
+    relative = LocalObjectStore(root=Path("gcp_storage"))
+    relative.put("snapshots/a.parquet", b"payload")
+
+    assert relative.list_keys("snapshots/") == ["snapshots/a.parquet"]
+
+
 def test_keys_cannot_escape_the_store_root(store: LocalObjectStore) -> None:
     """A traversing key would write outside the bucket's equivalent."""
 

@@ -63,12 +63,12 @@ class LocalObjectStore:
 
     def list_keys(self, prefix: str) -> list[str]:
         base = self.root.resolve()
-        return sorted(
+        keys = (
             path.relative_to(base).as_posix()
-            for path in self.root.rglob("*")
+            for path in base.rglob("*")
             if path.is_file()
-            and path.resolve().relative_to(base).as_posix().startswith(prefix)
         )
+        return sorted(key for key in keys if key.startswith(prefix))
 
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)
