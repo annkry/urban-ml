@@ -32,8 +32,11 @@ class ReadinessResponse(BaseModel):
     status: str
     model_loaded: bool
     model_run_id: str | None
-    database_reachable: bool
+    storage_reachable: bool
     latest_observed_at: datetime | None
     data_age_seconds: float | None
     max_data_age_seconds: float
     data_fresh: bool
+    history_span_seconds: float | None
+    required_history_seconds: float
+    history_deep_enough: bool

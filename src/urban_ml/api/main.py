@@ -2,9 +2,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
+import polars as pl
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
 
 from urban_ml.api.schemas import (
     HealthResponse,
@@ -25,39 +24,46 @@ from urban_ml.modeling.predict import (
     build_feature_row,
     predict_one,
 )
-from urban_ml.storage.db import get_db, get_session
-from urban_ml.storage.repository import (
-    get_station,
-    latest_status_observed_at,
-    list_system_ids,
+from urban_ml.staging.objects import ObjectStoreError, store_from_settings
+from urban_ml.staging.serving import ServingData, station_details, system_ids
+from urban_ml.staging.snapshots import (
+    covers_lookback,
+    history_span,
+    newest_observed_at,
 )
 
 configure_logging()
 logger = get_logger(__name__)
 
+_serving = ServingData(store=store_from_settings())
 
-def _resolve_system_id(session: Session) -> str:
+
+def get_serving() -> ServingData:
+    """The serving files this process reads. Overridden in tests."""
+
+    return _serving
+
+
+def _resolve_system_id(serving: ServingData) -> str:
+    """The system this process serves."""
+
     if settings.system_id:
         return settings.system_id
-    system_ids = list_system_ids(session)
-    if len(system_ids) != 1:
+
+    found = system_ids(serving.stations())
+    if len(found) != 1:
         raise RuntimeError(
-            f"Expected exactly one system_id in the database, found {list(system_ids)}. "
+            f"Expected exactly one system_id in the station list, found {found}. "
             "Set SYSTEM_ID explicitly if multiple systems are expected."
         )
-    return system_ids[0]
+    return found[0]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    logger.info(
-        "Starting %s in %s mode",
-        settings.app_name,
-        settings.app_env,
-    )
+    logger.info("Starting %s in %s mode", settings.app_name, settings.app_env)
 
-    with get_session() as session:
-        app.state.system_id = _resolve_system_id(session)
+    app.state.system_id = _resolve_system_id(get_serving())
 
     model_dir = settings.model_dir
     if model_artifacts_exist(model_dir):
@@ -89,21 +95,15 @@ app = FastAPI(
 
 
 _MAX_DATA_AGE = timedelta(minutes=LOOKBACK_MINUTES)
-
-
-def _as_utc(value: datetime) -> datetime:
-    """SQLite (the test backend) returns naive datetimes for a timezone-aware
-    column; Postgres returns aware ones."""
-
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+_REQUIRED_HISTORY = timedelta(minutes=LOOKBACK_MINUTES)
 
 
 @app.get("/health", response_model=HealthResponse)
 def health_check(request: Request, response: Response) -> HealthResponse:
     """Liveness. Deliberately touches nothing external, for the same reason
     the ingestion service's /health doesn't: Cloud Run probes this on every
-    cold start, and a check that queried the database would fail while a
-    scale-to-zero Neon was still waking."""
+    cold start, and a check that read from object storage would fail on a
+    transient blip and get the revision killed."""
 
     model = getattr(request.app.state, "model", None)
     if model is None:
@@ -120,31 +120,37 @@ def health_check(request: Request, response: Response) -> HealthResponse:
 
 @app.get("/ready", response_model=ReadinessResponse)
 def readiness_check(
-    request: Request, response: Response, session: Session = Depends(get_db)
+    request: Request,
+    response: Response,
+    serving: ServingData = Depends(get_serving),
 ) -> ReadinessResponse:
     """Whether a prediction could actually be served right now: model loaded,
-    database reachable, and data fresh enough to build features from."""
+    serving files readable, and the window both current and deep enough to
+    build a full feature row from."""
 
     model = getattr(request.app.state, "model", None)
-    system_id = getattr(request.app.state, "system_id", None)
 
-    latest_observed_at: datetime | None = None
-    database_reachable = True
+    storage_reachable = True
+    window = pl.DataFrame()
     try:
-        if system_id is not None:
-            latest_observed_at = latest_status_observed_at(session, system_id=system_id)
-    except SQLAlchemyError:
-        logger.exception("Readiness check could not reach the database")
-        database_reachable = False
+        window = serving.window()
+    except ObjectStoreError:
+        logger.exception("Readiness check could not read the serving window")
+        storage_reachable = False
+
+    latest_observed_at = newest_observed_at(window)
+    span = history_span(window)
 
     age_seconds: float | None = None
     if latest_observed_at is not None:
-        age_seconds = (datetime.now(UTC) - _as_utc(latest_observed_at)).total_seconds()
+        age_seconds = (datetime.now(UTC) - latest_observed_at).total_seconds()
 
     data_fresh = (
         age_seconds is not None and age_seconds <= _MAX_DATA_AGE.total_seconds()
     )
-    ready = model is not None and database_reachable and data_fresh
+    deep_enough = covers_lookback(window, lookback_minutes=LOOKBACK_MINUTES)
+
+    ready = model is not None and storage_reachable and data_fresh and deep_enough
     if not ready:
         response.status_code = 503
 
@@ -152,17 +158,22 @@ def readiness_check(
         status="ready" if ready else "not_ready",
         model_loaded=model is not None,
         model_run_id=getattr(request.app.state, "model_run_id", None),
-        database_reachable=database_reachable,
+        storage_reachable=storage_reachable,
         latest_observed_at=latest_observed_at,
         data_age_seconds=age_seconds,
         max_data_age_seconds=_MAX_DATA_AGE.total_seconds(),
         data_fresh=data_fresh,
+        history_span_seconds=None if span is None else span.total_seconds(),
+        required_history_seconds=_REQUIRED_HISTORY.total_seconds(),
+        history_deep_enough=deep_enough,
     )
 
 
 @app.get("/predict/{station_id}", response_model=PredictionResponse)
 def predict_station(
-    station_id: str, request: Request, session: Session = Depends(get_db)
+    station_id: str,
+    request: Request,
+    serving: ServingData = Depends(get_serving),
 ) -> PredictionResponse:
     model = getattr(request.app.state, "model", None)
     if model is None:
@@ -173,13 +184,22 @@ def predict_station(
     encoding = request.app.state.station_id_encoding
     system_id = request.app.state.system_id
 
-    station = get_station(session, system_id=system_id, station_id=station_id)
+    try:
+        stations = serving.stations()
+        window = serving.window()
+    except ObjectStoreError as exc:
+        logger.exception("Could not read the serving files")
+        raise HTTPException(
+            status_code=503, detail="Serving data is unavailable."
+        ) from exc
+
+    station = station_details(stations, system_id=system_id, station_id=station_id)
     if station is None:
         raise HTTPException(status_code=404, detail=f"Station {station_id} not found")
 
     try:
         feature_row = build_feature_row(
-            session, system_id=system_id, station_id=station_id, station=station
+            window, system_id=system_id, station_id=station_id, station=station
         )
     except InsufficientHistoryError:
         raise HTTPException(

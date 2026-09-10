@@ -30,7 +30,7 @@ STATUS_COLUMNS = ["is_installed", "is_renting", "is_returning"]
 _LAG_MINUTES = (5, 15, 30, 60)
 _LAG_JOIN_TOLERANCE_MINUTES = 5
 
-_REQUIRED_RAW_COLUMNS = {
+RAW_COLUMNS = (
     "station_id",
     "observed_at",
     "num_vehicles_available",
@@ -38,7 +38,8 @@ _REQUIRED_RAW_COLUMNS = {
     "is_installed",
     "is_renting",
     "is_returning",
-}
+)
+_REQUIRED_RAW_COLUMNS = set(RAW_COLUMNS)
 _REQUIRED_STATION_COLUMNS = {"station_id", "capacity"}
 
 

@@ -149,8 +149,8 @@ deploy_api() {
     --concurrency 40 \
     --timeout 60 \
     --startup-probe "httpGet.path=/health,initialDelaySeconds=0,periodSeconds=5,timeoutSeconds=5,failureThreshold=12" \
-    --set-secrets "DATABASE_URL=${SECRET_NAME}:latest" \
-    --set-env-vars "SYSTEM_ID=${SYSTEM_ID},MODEL_DIR=/app/models/current,APP_ENV=production"
+    --clear-secrets \
+    --set-env-vars "SYSTEM_ID=${SYSTEM_ID},MODEL_DIR=/app/models/current,APP_ENV=production,GCS_BUCKET=${BUCKET}"
 }
 
 deploy_ingest() {
