@@ -5,6 +5,16 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 
+TRACKED_STATION_FIELDS = (
+    "station_name",
+    "address",
+    "lat",
+    "lon",
+    "capacity",
+    "is_charging_station",
+)
+
+
 class Station(BaseModel):
     """A station's details as observed at one moment.
 

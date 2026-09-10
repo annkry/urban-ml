@@ -4,9 +4,9 @@ set -euo pipefail
 
 TARGET="${1:-all}"
 case "${TARGET}" in
-  all | api | ingest) ;;
+  all | api | ingest | archive) ;;
   *)
-    echo "usage: $(basename "$0") [all|api|ingest]" >&2
+    echo "usage: $(basename "$0") [all|api|ingest|archive]" >&2
     exit 2
     ;;
 esac
@@ -21,6 +21,10 @@ SCHEDULER_JOB="${SCHEDULER_JOB:-urban-ml-ingest-5min}"
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-urban-ml-scheduler}"
 SECRET_NAME="${SECRET_NAME:-urban-ml-database-url}"
 BUCKET="${BUCKET:-${PROJECT_ID}-urban-ml-staging}"
+ARCHIVE_JOB="${ARCHIVE_JOB:-urban-ml-archive}"
+ARCHIVE_SCHEDULER_JOB="${ARCHIVE_SCHEDULER_JOB:-urban-ml-archive-daily}"
+ARCHIVE_SCHEDULE="${ARCHIVE_SCHEDULE:-20 4 * * *}"
+HF_SECRET_NAME="${HF_SECRET_NAME:-urban-ml-hf-token}"
 
 SYSTEM_ID="${SYSTEM_ID:-bike_share_toronto}"
 
@@ -74,12 +78,38 @@ else
   echo "    using the stored value"
 fi
 
+echo "==> Hugging Face token in Secret Manager"
+if ! gcloud secrets describe "${HF_SECRET_NAME}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
+  : "${HF_TOKEN:?secret ${HF_SECRET_NAME} does not exist yet -- set HF_TOKEN once to create it}"
+  gcloud secrets create "${HF_SECRET_NAME}" \
+    --replication-policy automatic --project "${PROJECT_ID}" >/dev/null
+  printf '%s' "${HF_TOKEN}" |
+    gcloud secrets versions add "${HF_SECRET_NAME}" \
+      --data-file=- --project "${PROJECT_ID}" >/dev/null
+  echo "    created ${HF_SECRET_NAME}"
+elif [[ -n "${HF_TOKEN:-}" ]]; then
+  CURRENT_HF="$(gcloud secrets versions access latest --secret "${HF_SECRET_NAME}" \
+    --project "${PROJECT_ID}" 2>/dev/null || true)"
+  if [[ "${CURRENT_HF}" != "${HF_TOKEN}" ]]; then
+    printf '%s' "${HF_TOKEN}" |
+      gcloud secrets versions add "${HF_SECRET_NAME}" \
+        --data-file=- --project "${PROJECT_ID}" >/dev/null
+    echo "    added a new version of ${HF_SECRET_NAME}"
+  else
+    echo "    unchanged"
+  fi
+else
+  echo "    using the stored value"
+fi
+
 PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format 'value(projectNumber)')"
 RUNTIME_SA="${RUNTIME_SERVICE_ACCOUNT:-${PROJECT_NUMBER}-compute@developer.gserviceaccount.com}"
-gcloud secrets add-iam-policy-binding "${SECRET_NAME}" \
-  --member "serviceAccount:${RUNTIME_SA}" \
-  --role roles/secretmanager.secretAccessor \
-  --project "${PROJECT_ID}" >/dev/null
+for secret in "${SECRET_NAME}" "${HF_SECRET_NAME}"; do
+  gcloud secrets add-iam-policy-binding "${secret}" \
+    --member "serviceAccount:${RUNTIME_SA}" \
+    --role roles/secretmanager.secretAccessor \
+    --project "${PROJECT_ID}" >/dev/null
+done
 
 echo "==> Staging bucket"
 if ! gcloud storage buckets describe "gs://${BUCKET}" \
@@ -172,6 +202,64 @@ deploy_ingest() {
     --set-env-vars "SYSTEM_ID=${SYSTEM_ID},APP_ENV=production,GCS_BUCKET=${BUCKET}"
 }
 
+deploy_archive() {
+  echo "==> Deploying ${ARCHIVE_JOB} (Cloud Run job)"
+
+  local env_vars=(
+    "GCS_BUCKET=${BUCKET}"
+    "SYSTEM_ID=${SYSTEM_ID}"
+    "APP_ENV=production"
+    "HF_DATASET_REPO=${HF_DATASET_REPO:?set HF_DATASET_REPO}"
+  )
+  [[ -n "${ARCHIVE_START_DATE:-}" ]] &&
+    env_vars+=("ARCHIVE_START_DATE=${ARCHIVE_START_DATE}")
+  [[ -n "${RETENTION_DAYS:-}" ]] && env_vars+=("RETENTION_DAYS=${RETENTION_DAYS}")
+
+  local joined
+  joined="$(
+    IFS=,
+    echo "${env_vars[*]}"
+  )"
+
+  gcloud run jobs deploy "${ARCHIVE_JOB}" \
+    --image "${IMAGE}" \
+    --region "${REGION}" \
+    --project "${PROJECT_ID}" \
+    --command urban-ml-archive \
+    --memory 1Gi \
+    --cpu 1 \
+    --max-retries 1 \
+    --task-timeout 1800 \
+    --set-secrets "HF_TOKEN=${HF_SECRET_NAME}:latest" \
+    --set-env-vars "${joined}"
+}
+
+ensure_archive_scheduler() {
+  echo "==> Daily archive schedule"
+  gcloud run jobs add-iam-policy-binding "${ARCHIVE_JOB}" \
+    --region "${REGION}" --project "${PROJECT_ID}" \
+    --member "serviceAccount:${SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" \
+    --role roles/run.invoker >/dev/null
+
+  local args=(
+    --location "${REGION}"
+    --project "${PROJECT_ID}"
+    --schedule "${ARCHIVE_SCHEDULE}"
+    --time-zone "Etc/UTC"
+    --uri "https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/${ARCHIVE_JOB}:run"
+    --http-method POST
+    --oauth-service-account-email "${SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com"
+    --attempt-deadline 1800s
+    --max-retry-attempts 1
+  )
+  if gcloud scheduler jobs describe "${ARCHIVE_SCHEDULER_JOB}" \
+    --location "${REGION}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
+    gcloud scheduler jobs update http "${ARCHIVE_SCHEDULER_JOB}" "${args[@]}"
+  else
+    gcloud scheduler jobs create http "${ARCHIVE_SCHEDULER_JOB}" "${args[@]}"
+  fi
+}
+
 ensure_scheduler() {
   local service_url
   service_url="$(gcloud run services describe "${INGEST_SERVICE}" \
@@ -214,6 +302,11 @@ if [[ "${TARGET}" == "all" || "${TARGET}" == "ingest" ]]; then
   ensure_scheduler
 fi
 
+if [[ "${TARGET}" == "all" || "${TARGET}" == "archive" ]]; then
+  deploy_archive
+  ensure_archive_scheduler
+fi
+
 if [[ "${TARGET}" == "all" || "${TARGET}" == "api" ]]; then
   deploy_api
   API_URL="$(gcloud run services describe "${API_SERVICE}" \
@@ -227,5 +320,6 @@ if [[ -n "${API_URL:-}" ]]; then
   echo "  curl ${API_URL}/health"
   echo "  curl ${API_URL}/ready"
 fi
+echo "  run the archive now: gcloud run jobs execute ${ARCHIVE_JOB} --region ${REGION}"
 echo "  gcloud run revisions list --region ${REGION} --project ${PROJECT_ID}"
 echo "  roll back: gcloud run services update-traffic SERVICE --to-revisions REVISION=100 --region ${REGION}"

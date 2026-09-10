@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
-from urban_ml.domain.station import Station as StationData
+from urban_ml.domain.station import TRACKED_STATION_FIELDS, Station as StationData
 from urban_ml.domain.station_status import StationStatus
 from urban_ml.domain.vehicle_type import VehicleType as VehicleTypeData
 from urban_ml.storage.models import (
@@ -42,16 +42,6 @@ def latest_stations(session: Session, *, system_id: str) -> Sequence[Station]:
         & (Station.system_id == system_id),
     )
     return session.scalars(stmt).all()
-
-
-TRACKED_STATION_FIELDS = (
-    "station_name",
-    "address",
-    "lat",
-    "lon",
-    "capacity",
-    "is_charging_station",
-)
 
 
 def _station_details(station: Station | StationData) -> tuple[object, ...]:

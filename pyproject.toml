@@ -12,6 +12,7 @@ dependencies = [
     "alembic>=1.13",
     "fastapi>=0.139.0",
     "google-cloud-storage>=2.19",
+    "huggingface-hub>=0.35",
     "lightgbm>=4.7.0",
     "numpy>=2.1",
     "pandas>=2.2",
@@ -23,10 +24,12 @@ dependencies = [
     "uvicorn>=0.50.0",
 ]
 
+[project.scripts]
+urban-ml-archive = "urban_ml.archive.cli:main"
+
 [dependency-groups]
 dev = [
     "httpx2>=2.5.0",
-    "huggingface-hub>=0.35",
     "matplotlib>=3.11.1",
     "mlflow>=3.15.1",
     "mypy>=2.1.0",
