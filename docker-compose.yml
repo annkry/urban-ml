@@ -17,10 +17,11 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "urban_ml.ingestion.loop"]
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      GCS_BUCKET: ${GCS_BUCKET}
+      GOOGLE_APPLICATION_CREDENTIALS: /gcloud/application_default_credentials.json
       PYTHONUNBUFFERED: "1"
-    depends_on:
-      - postgres
+    volumes:
+      - ${HOME}/.config/gcloud/application_default_credentials.json:/gcloud/application_default_credentials.json:ro
     read_only: true
     tmpfs:
       - /tmp

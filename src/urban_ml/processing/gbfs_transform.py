@@ -4,7 +4,6 @@ from datetime import datetime
 
 from urban_ml.domain.station import Station
 from urban_ml.domain.station_status import StationStatus
-from urban_ml.domain.vehicle_type import VehicleType
 from urban_ml.ingestion.gbfs_client import GbfsRawFeeds
 from urban_ml.schemas.gbfs import (
     LocalizedString,
@@ -40,25 +39,6 @@ def build_stations(
             observed_at=observed_at,
         )
         for station in raw_feeds.station_information.data.stations
-    ]
-
-
-def build_vehicle_types(
-    raw_feeds: GbfsRawFeeds,
-    *,
-    system_id: str,
-) -> list[VehicleType]:
-    """Extract vehicle type metadata (dimension data) from vehicle_types."""
-
-    return [
-        VehicleType(
-            system_id=system_id,
-            vehicle_type_id=vehicle_type.vehicle_type_id,
-            form_factor=vehicle_type.form_factor,
-            propulsion_type=vehicle_type.propulsion_type,
-            name=_optional_localized_text(vehicle_type.name),
-        )
-        for vehicle_type in raw_feeds.vehicle_types.data.vehicle_types
     ]
 
 
@@ -167,17 +147,6 @@ def _station_name(station: StationInformationStation) -> str:
 def _preferred_localized_text(values: list[LocalizedString]) -> str:
     if not values:
         raise GbfsTransformError("Station has no localized name values")
-
-    for value in values:
-        if value.language.lower() == "en":
-            return value.text
-
-    return values[0].text
-
-
-def _optional_localized_text(values: list[LocalizedString] | None) -> str | None:
-    if not values:
-        return None
 
     for value in values:
         if value.language.lower() == "en":

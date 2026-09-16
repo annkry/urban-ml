@@ -8,7 +8,6 @@ from urban_ml.processing.gbfs_transform import (
     GbfsTransformError,
     build_station_status,
     build_stations,
-    build_vehicle_types,
 )
 from urban_ml.schemas.gbfs import (
     GbfsDiscoveryResponse,
@@ -193,21 +192,6 @@ def test_build_station_status_rejects_missing_station_information() -> None:
             known_station_ids={"station-1"},
             observed_at=datetime(2026, 7, 5, 11, 6, 3, tzinfo=UTC),
         )
-
-
-def test_build_vehicle_types_extracts_metadata() -> None:
-    vehicle_types = build_vehicle_types(_raw_feeds(), system_id="toronto")
-
-    assert len(vehicle_types) == 2
-    classic = next(vt for vt in vehicle_types if vt.vehicle_type_id == "CLASSIC")
-    assert classic.system_id == "toronto"
-    assert classic.form_factor == "bicycle"
-    assert classic.propulsion_type == "human"
-    assert classic.name == "Classic Bike"
-
-    ebike = next(vt for vt in vehicle_types if vt.vehicle_type_id == "EBIKE")
-    assert ebike.propulsion_type == "electric_assist"
-    assert ebike.name is None
 
 
 def _status_payload(entries: list[dict] | None) -> dict:

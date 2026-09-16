@@ -5,9 +5,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
-
 from urban_ml.core.config import settings
 from urban_ml.ingestion.gbfs_client import (
     GbfsClient,
@@ -19,19 +16,9 @@ from urban_ml.processing.gbfs_transform import (
     GbfsTransformError,
     build_station_status,
     build_stations,
-    build_vehicle_types,
 )
-from urban_ml.staging.objects import ObjectStore, store_from_settings
-from urban_ml.staging.snapshots import stage_cycle_or_log
-from urban_ml.storage.db import get_session
-from urban_ml.storage.repository import (
-    complete_ingestion_run,
-    fail_ingestion_run,
-    save_station_status,
-    record_station_changes,
-    start_ingestion_run,
-    upsert_vehicle_types,
-)
+from urban_ml.staging.objects import ObjectStore, ObjectStoreError, store_from_settings
+from urban_ml.staging.snapshots import stage_cycle
 
 
 @dataclass(frozen=True)
@@ -44,80 +31,51 @@ class GbfsIngestionSummary:
     status_count: int
     matched_station_status_count: int
     processed_station_status_count: int
-    vehicle_type_count: int
-    station_change_count: int
-    snapshot_staged: bool = False
+    station_status_key: str
+    stations_key: str
 
 
 def ingest_gbfs_station_feeds(
     discovery_url: str,
     *,
     timeout_seconds: float,
-    session: Session,
+    object_store: ObjectStore,
     json_fetcher: JsonFetcher = fetch_json_with_retry,
-    object_store: ObjectStore | None = None,
 ) -> GbfsIngestionSummary:
-    """Fetch, validate, and persist GBFS station feeds to the database."""
+    """Fetch, validate, and stage GBFS station feeds to object storage."""
 
     observed_at = datetime.now(UTC)
-    run = start_ingestion_run(session, started_at=observed_at)
-    system_id: str | None = None
 
-    try:
-        client = GbfsClient(
-            discovery_url, timeout_seconds=timeout_seconds, json_fetcher=json_fetcher
-        )
-        raw_feeds = client.fetch_raw_feeds()
-        system_id = raw_feeds.system_information.data.system_id
+    client = GbfsClient(
+        discovery_url, timeout_seconds=timeout_seconds, json_fetcher=json_fetcher
+    )
+    raw_feeds = client.fetch_raw_feeds()
+    system_id = raw_feeds.system_information.data.system_id
 
-        station_ids = {
-            station.station_id
-            for station in raw_feeds.station_information.data.stations
-        }
-        status_station_ids = {
-            station.station_id for station in raw_feeds.station_status.data.stations
-        }
+    station_ids = {
+        station.station_id for station in raw_feeds.station_information.data.stations
+    }
+    status_station_ids = {
+        station.station_id for station in raw_feeds.station_status.data.stations
+    }
 
-        stations = build_stations(
-            raw_feeds, system_id=system_id, observed_at=observed_at
-        )
-        station_changes = record_station_changes(session, stations, system_id=system_id)
+    stations = build_stations(raw_feeds, system_id=system_id, observed_at=observed_at)
+    station_status_records = build_station_status(
+        raw_feeds,
+        system_id=system_id,
+        known_station_ids=station_ids,
+        observed_at=observed_at,
+    )
 
-        vehicle_types = build_vehicle_types(raw_feeds, system_id=system_id)
-        upsert_vehicle_types(session, vehicle_types)
-
-        station_status_records = build_station_status(
-            raw_feeds,
-            system_id=system_id,
-            known_station_ids=station_ids,
-            observed_at=observed_at,
-        )
-        save_station_status(session, station_status_records)
-
-        complete_ingestion_run(
-            session,
-            run,
-            system_id=system_id,
-            finished_at=datetime.now(UTC),
-            row_count=len(station_status_records),
-        )
-    except (GbfsClientError, GbfsTransformError, SQLAlchemyError) as exc:
-        fail_ingestion_run(
-            session,
-            run,
-            system_id=system_id,
-            finished_at=datetime.now(UTC),
-            error_message=str(exc),
-        )
-        raise
-
-    snapshot_staged = False
-    if object_store is not None:
-        snapshot_staged = stage_cycle_or_log(
-            object_store,
-            status_records=station_status_records,
-            station_records=stations,
-            observed_at=observed_at,
+    staged = stage_cycle(
+        object_store,
+        status_records=station_status_records,
+        station_records=stations,
+        observed_at=observed_at,
+    )
+    if staged is None:
+        raise GbfsTransformError(
+            "station_status feed yielded no rows; nothing was staged"
         )
 
     return GbfsIngestionSummary(
@@ -129,9 +87,8 @@ def ingest_gbfs_station_feeds(
         status_count=len(status_station_ids),
         matched_station_status_count=len(station_ids & status_station_ids),
         processed_station_status_count=len(station_status_records),
-        vehicle_type_count=len(vehicle_types),
-        station_change_count=station_changes,
-        snapshot_staged=snapshot_staged,
+        station_status_key=staged.station_status_key,
+        stations_key=staged.stations_key,
     )
 
 
@@ -146,9 +103,8 @@ def format_ingestion_summary(summary: GbfsIngestionSummary) -> str:
         f"Station statuses discovered: {summary.status_count}",
         f"Stations with matching status: {summary.matched_station_status_count}",
         f"Processed station status rows: {summary.processed_station_status_count}",
-        f"Vehicle types: {summary.vehicle_type_count}",
-        f"Station detail changes recorded: {summary.station_change_count}",
-        f"Snapshot staged to object storage: {summary.snapshot_staged}",
+        f"Station status staged at: {summary.station_status_key}",
+        f"Stations staged at: {summary.stations_key}",
     ]
 
     return "\n".join(lines)
@@ -157,8 +113,8 @@ def format_ingestion_summary(summary: GbfsIngestionSummary) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Fetch, validate, and persist GBFS station information and "
-            "station status feeds."
+            "Fetch, validate, and stage GBFS station information and "
+            "station status feeds to object storage."
         )
     )
     parser.add_argument(
@@ -179,18 +135,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    object_store = store_from_settings()
+    if object_store is None:
+        parser.exit(
+            status=1,
+            message="GBFS ingestion failed: GCS_BUCKET is not set; nowhere to stage.\n",
+        )
+
     try:
-        with get_session() as session:
-            summary = ingest_gbfs_station_feeds(
-                args.discovery_url,
-                timeout_seconds=args.timeout_seconds,
-                session=session,
-                object_store=store_from_settings(),
-            )
+        summary = ingest_gbfs_station_feeds(
+            args.discovery_url,
+            timeout_seconds=args.timeout_seconds,
+            object_store=object_store,
+        )
     except (
         GbfsClientError,
         GbfsTransformError,
-        SQLAlchemyError,
+        ObjectStoreError,
         RuntimeError,
         ValueError,
     ) as exc:

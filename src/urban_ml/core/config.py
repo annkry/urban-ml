@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     # Days before this are never archived.
     archive_start_date: date | None = None
 
-    # Days of station_status to keep in the database.
+    # Days of staged snapshots to keep in the bucket once the archive holds them.
     retention_days: BlankIsUnset[int] = None
 
     model_config = SettingsConfigDict(

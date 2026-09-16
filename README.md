@@ -8,8 +8,8 @@ over HTTP.
 ## Pipeline
 
 1. **Ingest.** Every 5 minutes, the GBFS station feeds are fetched, validated,
-   and written to Postgres; the same snapshot is staged as Parquet in object
-   storage (`src/urban_ml/ingestion/`).
+   and staged as Parquet snapshots in object storage, which is the only sink
+   (`src/urban_ml/ingestion/`).
 2. **Archive.** A daily job exports complete days from the staging bucket to a
    Hugging Face dataset repo, then trims what the Hub confirms
    (`src/urban_ml/archive/`). Toronto's archive is published as
@@ -39,15 +39,15 @@ can invoke it.
 ```bash
 cp .env.example .env
 make install
-docker compose up -d postgres
-make db-upgrade
 make ingest-gbfs          # one ingestion cycle
 make run                  # API on http://localhost:8000/docs
 ```
 
-`docker compose up` runs Postgres, the ingestion loop and the API together.
-Staging is off until `GCS_BUCKET` is set, and `/predict` reads from it, so
-without a bucket the API answers `/health` but not predictions.
+Ingestion and `/predict` both go through the bucket, so both need
+`GCS_BUCKET` and Google credentials (`gcloud auth application-default login`
+locally). Without a bucket the API still answers `/health`, but ingestion
+refuses to start. `docker compose up` runs the ingestion loop and the API
+together, mounting your application default credentials into the loop.
 
 ## Deployment
 

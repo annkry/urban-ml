@@ -19,7 +19,6 @@ API_SERVICE="${API_SERVICE:-urban-ml-api}"
 INGEST_SERVICE="${INGEST_SERVICE:-urban-ml-ingest}"
 SCHEDULER_JOB="${SCHEDULER_JOB:-urban-ml-ingest-5min}"
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-urban-ml-scheduler}"
-SECRET_NAME="${SECRET_NAME:-urban-ml-database-url}"
 BUCKET="${BUCKET:-${PROJECT_ID}-urban-ml-staging}"
 ARCHIVE_JOB="${ARCHIVE_JOB:-urban-ml-archive}"
 ARCHIVE_SCHEDULER_JOB="${ARCHIVE_SCHEDULER_JOB:-urban-ml-archive-daily}"
@@ -54,30 +53,6 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
   secretmanager.googleapis.com storage.googleapis.com \
   --project "${PROJECT_ID}"
 
-echo "==> Database URL in Secret Manager"
-if ! gcloud secrets describe "${SECRET_NAME}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
-  : "${DATABASE_URL:?secret ${SECRET_NAME} does not exist yet -- set DATABASE_URL once to create it}"
-  gcloud secrets create "${SECRET_NAME}" \
-    --replication-policy automatic --project "${PROJECT_ID}" >/dev/null
-  printf '%s' "${DATABASE_URL}" |
-    gcloud secrets versions add "${SECRET_NAME}" \
-      --data-file=- --project "${PROJECT_ID}" >/dev/null
-  echo "    created ${SECRET_NAME}"
-elif [[ -n "${DATABASE_URL:-}" ]]; then
-  CURRENT="$(gcloud secrets versions access latest --secret "${SECRET_NAME}" \
-    --project "${PROJECT_ID}" 2>/dev/null || true)"
-  if [[ "${CURRENT}" != "${DATABASE_URL}" ]]; then
-    printf '%s' "${DATABASE_URL}" |
-      gcloud secrets versions add "${SECRET_NAME}" \
-        --data-file=- --project "${PROJECT_ID}" >/dev/null
-    echo "    added a new version of ${SECRET_NAME}"
-  else
-    echo "    unchanged"
-  fi
-else
-  echo "    using the stored value"
-fi
-
 echo "==> Hugging Face token in Secret Manager"
 if ! gcloud secrets describe "${HF_SECRET_NAME}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
   : "${HF_TOKEN:?secret ${HF_SECRET_NAME} does not exist yet -- set HF_TOKEN once to create it}"
@@ -104,12 +79,10 @@ fi
 
 PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format 'value(projectNumber)')"
 RUNTIME_SA="${RUNTIME_SERVICE_ACCOUNT:-${PROJECT_NUMBER}-compute@developer.gserviceaccount.com}"
-for secret in "${SECRET_NAME}" "${HF_SECRET_NAME}"; do
-  gcloud secrets add-iam-policy-binding "${secret}" \
-    --member "serviceAccount:${RUNTIME_SA}" \
-    --role roles/secretmanager.secretAccessor \
-    --project "${PROJECT_ID}" >/dev/null
-done
+gcloud secrets add-iam-policy-binding "${HF_SECRET_NAME}" \
+  --member "serviceAccount:${RUNTIME_SA}" \
+  --role roles/secretmanager.secretAccessor \
+  --project "${PROJECT_ID}" >/dev/null
 
 echo "==> Staging bucket"
 if ! gcloud storage buckets describe "gs://${BUCKET}" \
@@ -198,7 +171,7 @@ deploy_ingest() {
     --min-instances 0 \
     --max-instances 1 \
     --timeout 120 \
-    --set-secrets "DATABASE_URL=${SECRET_NAME}:latest" \
+    --clear-secrets \
     --set-env-vars "SYSTEM_ID=${SYSTEM_ID},APP_ENV=production,GCS_BUCKET=${BUCKET}"
 }
 

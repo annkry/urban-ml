@@ -14,8 +14,6 @@ from urban_ml.domain.station_status import StationStatus
 from urban_ml.modeling.predict import LOOKBACK_MINUTES
 from urban_ml.staging.objects import (
     LocalObjectStore,
-    ObjectNotFoundError,
-    ObjectStoreError,
 )
 from urban_ml.staging.snapshots import (
     RECENT_WINDOW_MINUTES,
@@ -27,7 +25,6 @@ from urban_ml.staging.snapshots import (
     read_stations,
     snapshot_key,
     stage_cycle,
-    stage_cycle_or_log,
     stations_frame,
     status_frame,
     trim_to_window,
@@ -425,53 +422,3 @@ def test_stage_cycle_with_no_records_writes_nothing(store: LocalObjectStore) -> 
 
     assert staged is None
     assert store.list_keys("") == []
-
-
-# --- failure containment ---------------------------------------------------
-
-
-class _BrokenStore:
-    """A store whose every write fails, as an unreachable bucket would."""
-
-    def put(self, key: str, data: bytes) -> None:
-        raise ObjectStoreError("bucket unreachable")
-
-    def get(self, key: str) -> bytes:
-        raise ObjectNotFoundError(key)
-
-    def exists(self, key: str) -> bool:
-        return False
-
-    def list_keys(self, prefix: str) -> list[str]:
-        return []
-
-    def delete(self, key: str) -> None:
-        return None
-
-
-def test_store_outage_does_not_fail_the_ingestion_run() -> None:
-    """The database is authoritative; staging is a shadow write."""
-
-    moment = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
-
-    assert (
-        stage_cycle_or_log(
-            _BrokenStore(),
-            status_records=_cycle(moment),
-            station_records=_stations(moment),
-            observed_at=moment,
-        )
-        is False
-    )
-
-
-def test_a_bug_in_staging_is_not_swallowed() -> None:
-    """Only store failures are contained; programming errors must surface."""
-
-    with pytest.raises(ValueError, match="timezone-aware"):
-        stage_cycle_or_log(
-            _BrokenStore(),
-            status_records=_cycle(datetime(2026, 9, 9, 12, 0, tzinfo=UTC)),
-            station_records=_stations(datetime(2026, 9, 9, 12, 0, tzinfo=UTC)),
-            observed_at=datetime(2026, 9, 9, 12, 0),
-        )
