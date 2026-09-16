@@ -7,13 +7,11 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy.exc import SQLAlchemyError
-
 from urban_ml.core.config import settings
 from urban_ml.ingestion.gbfs_client import GbfsClientError
 from urban_ml.ingestion.gbfs_ingest import ingest_gbfs_station_feeds
 from urban_ml.processing.gbfs_transform import GbfsTransformError
-from urban_ml.storage.db import get_session
+from urban_ml.staging.objects import ObjectStore, ObjectStoreError, store_from_settings
 
 INTERVAL_SECONDS = 300
 LOCK_PATH = Path(tempfile.gettempdir()) / "urban-ml-ingest-loop.lock"
@@ -31,29 +29,34 @@ def _acquire_lock() -> object:
     return lock_file
 
 
-def run_once() -> None:
+def run_once(object_store: ObjectStore) -> None:
     started = datetime.now(UTC)
     try:
-        with get_session() as session:
-            summary = ingest_gbfs_station_feeds(
-                settings.gbfs_discovery_url,
-                timeout_seconds=settings.timeout_seconds,
-                session=session,
-            )
-        print(
-            f"[{started.isoformat()}] {summary.processed_station_status_count} stations ingested"
+        summary = ingest_gbfs_station_feeds(
+            settings.gbfs_discovery_url,
+            timeout_seconds=settings.timeout_seconds,
+            object_store=object_store,
         )
-    except (GbfsClientError, GbfsTransformError, SQLAlchemyError) as exc:
+        print(
+            f"[{started.isoformat()}] {summary.processed_station_status_count} "
+            f"stations staged at {summary.station_status_key}"
+        )
+    except (GbfsClientError, GbfsTransformError, ObjectStoreError) as exc:
         print(f"[{started.isoformat()}] Ingestion failed: {exc}")
 
 
 def main() -> int:
+    object_store = store_from_settings()
+    if object_store is None:
+        print("GCS_BUCKET is not set; there is nowhere to stage snapshots.")
+        return 1
+
     _acquire_lock()
     print(f"Ingesting every {INTERVAL_SECONDS}s. Press Ctrl+C to stop.")
     try:
         while True:
             loop_started = time.monotonic()
-            run_once()
+            run_once(object_store)
             elapsed = time.monotonic() - loop_started
             time.sleep(max(0.0, INTERVAL_SECONDS - elapsed))
     except KeyboardInterrupt:

@@ -14,7 +14,7 @@ from urban_ml.archive.layout import STATION_STATUS, STATIONS
 from urban_ml.core.logging import get_logger
 from urban_ml.domain.station import Station
 from urban_ml.domain.station_status import StationStatus
-from urban_ml.staging.objects import ObjectNotFoundError, ObjectStore, ObjectStoreError
+from urban_ml.staging.objects import ObjectNotFoundError, ObjectStore
 
 logger = get_logger(__name__)
 
@@ -256,27 +256,3 @@ def stage_cycle(
         staged.window_span,
     )
     return staged
-
-
-def stage_cycle_or_log(
-    store: ObjectStore,
-    *,
-    status_records: Sequence[StationStatus],
-    station_records: Sequence[Station],
-    observed_at: datetime,
-) -> bool:
-    """stage_cycle, but a store outage does not fail the ingestion run."""
-
-    try:
-        return (
-            stage_cycle(
-                store,
-                status_records=status_records,
-                station_records=station_records,
-                observed_at=observed_at,
-            )
-            is not None
-        )
-    except (ObjectStoreError, SnapshotError):
-        logger.exception("Staging to object storage failed; database write stands")
-        return False

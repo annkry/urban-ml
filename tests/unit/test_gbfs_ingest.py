@@ -1,6 +1,9 @@
-import pytest
-from sqlalchemy import select
+from pathlib import Path
 
+import polars as pl
+import pytest
+
+from urban_ml.archive.layout import STATION_STATUS, STATIONS
 from urban_ml.ingestion.gbfs_client import GbfsFetchError
 from urban_ml.ingestion.gbfs_ingest import (
     GbfsIngestionSummary,
@@ -8,13 +11,12 @@ from urban_ml.ingestion.gbfs_ingest import (
     ingest_gbfs_station_feeds,
 )
 from urban_ml.processing.gbfs_transform import GbfsTransformError
-from urban_ml.storage.models import (
-    IngestionRun,
-    IngestionRunStatus,
-    Station,
-    StationStatusRecord,
-    VehicleType,
+from urban_ml.staging.objects import (
+    LocalObjectStore,
+    ObjectNotFoundError,
+    ObjectStoreError,
 )
+from urban_ml.staging.snapshots import STATION_STATUS_KEY, STATIONS_KEY
 
 DISCOVERY_URL = "https://example.com/gbfs/3/gbfs"
 SYSTEM_INFORMATION_URL = "https://example.com/gbfs/3/system_information"
@@ -23,7 +25,12 @@ STATION_INFORMATION_URL = "https://example.com/gbfs/3/station_information"
 STATION_STATUS_URL = "https://example.com/gbfs/3/station_status"
 
 
-def test_format_ingestion_summary_includes_counts() -> None:
+@pytest.fixture
+def store(tmp_path: Path) -> LocalObjectStore:
+    return LocalObjectStore(root=tmp_path)
+
+
+def test_format_ingestion_summary_includes_counts_and_keys() -> None:
     summary = GbfsIngestionSummary(
         discovery_url="https://example.com/gbfs/3/gbfs",
         system_id="bike_share_toronto",
@@ -33,8 +40,8 @@ def test_format_ingestion_summary_includes_counts() -> None:
         status_count=3,
         matched_station_status_count=2,
         processed_station_status_count=2,
-        vehicle_type_count=4,
-        station_change_count=6,
+        station_status_key="snapshots/station_status/date=2026-09-16/x.parquet",
+        stations_key="snapshots/stations/date=2026-09-16/x.parquet",
     )
 
     formatted = format_ingestion_summary(summary)
@@ -44,8 +51,8 @@ def test_format_ingestion_summary_includes_counts() -> None:
     assert "Stations discovered: 2" in formatted
     assert "Station statuses discovered: 3" in formatted
     assert "Stations with matching status: 2" in formatted
-    assert "Vehicle types: 4" in formatted
-    assert "Station detail changes recorded: 6" in formatted
+    assert "Station status staged at: snapshots/station_status/" in formatted
+    assert "Stations staged at: snapshots/stations/" in formatted
 
 
 def _payloads() -> dict[str, dict]:
@@ -129,51 +136,51 @@ def _payloads() -> dict[str, dict]:
     }
 
 
-def test_ingest_gbfs_station_feeds_persists_raw_payload_status_and_run(
-    session,
-) -> None:
-    payloads = _payloads()
-
+def _fetcher_for(payloads: dict[str, dict]):
     def fake_fetcher(url: str, timeout_seconds: float) -> dict:
         return payloads[url]
 
+    return fake_fetcher
+
+
+def _read(store: LocalObjectStore, key: str) -> pl.DataFrame:
+    return pl.read_parquet(store.root / key)
+
+
+def test_ingest_stages_snapshots_and_serving_window(store: LocalObjectStore) -> None:
     summary = ingest_gbfs_station_feeds(
         DISCOVERY_URL,
         timeout_seconds=10.0,
-        session=session,
-        json_fetcher=fake_fetcher,
+        object_store=store,
+        json_fetcher=_fetcher_for(_payloads()),
     )
 
     assert summary.system_id == "bike_share_toronto"
     assert summary.station_count == 1
     assert summary.matched_station_status_count == 1
     assert summary.processed_station_status_count == 1
-    assert summary.vehicle_type_count == 2
-    assert summary.station_change_count == 1
+    assert summary.station_status_key.startswith(f"snapshots/{STATION_STATUS}/date=")
+    assert summary.stations_key.startswith(f"snapshots/{STATIONS}/date=")
 
-    station = session.scalars(select(Station)).one()
-    assert station.station_id == "station-1"
-    assert station.station_name == "Main Station"
+    status = _read(store, summary.station_status_key)
+    assert status["station_id"].to_list() == ["station-1"]
+    assert status["num_vehicles_available"].to_list() == [7]
+    assert status["num_vehicles_electric"].to_list() == [2]
 
-    status_record = session.scalars(select(StationStatusRecord)).one()
-    assert status_record.station_id == "station-1"
-    assert status_record.num_vehicles_available == 7
+    stations = _read(store, summary.stations_key)
+    assert stations["station_name"].to_list() == ["Main Station"]
 
-    vehicle_types = session.scalars(select(VehicleType)).all()
-    assert {vt.vehicle_type_id for vt in vehicle_types} == {"CLASSIC", "EBIKE"}
-
-    run = session.scalars(select(IngestionRun)).one()
-    assert run.status == IngestionRunStatus.SUCCESS
-    assert run.system_id == "bike_share_toronto"
-    assert run.row_count == 1
+    window = _read(store, STATION_STATUS_KEY)
+    assert window["station_id"].to_list() == ["station-1"]
+    assert _read(store, STATIONS_KEY).equals(stations)
 
 
-def test_ingest_gbfs_station_feeds_records_failed_run_with_unknown_system_id(
-    session,
+def test_an_upstream_failure_propagates_and_stages_nothing(
+    store: LocalObjectStore,
 ) -> None:
-    """Fails before system_information is even fetched, so system_id is
-    genuinely unknown, not just unset.
-    """
+    """Fails before system_information is even fetched. With no second sink
+    there is nothing to record the failure in; the caller sees the exception
+    and the bucket is untouched."""
 
     def failing_fetcher(url: str, timeout_seconds: float) -> dict:
         raise GbfsFetchError("upstream is down")
@@ -182,41 +189,77 @@ def test_ingest_gbfs_station_feeds_records_failed_run_with_unknown_system_id(
         ingest_gbfs_station_feeds(
             DISCOVERY_URL,
             timeout_seconds=10.0,
-            session=session,
+            object_store=store,
             json_fetcher=failing_fetcher,
         )
 
-    run = session.scalars(select(IngestionRun)).one()
-    assert run.status == IngestionRunStatus.FAILURE
-    assert run.system_id is None
-    assert run.error_message == "upstream is down"
-
-    assert session.scalars(select(StationStatusRecord)).first() is None
-    assert session.scalars(select(Station)).first() is None
-    assert session.scalars(select(VehicleType)).first() is None
+    assert store.list_keys("") == []
 
 
-def test_ingest_gbfs_station_feeds_records_failed_run_with_known_system_id(
-    session,
+def test_a_transform_failure_propagates_and_stages_nothing(
+    store: LocalObjectStore,
 ) -> None:
-    """A failure after system_information succeeds should still record the
-    now-known system_id, not lose it to the rollback inside fail_ingestion_run.
-    """
-
     payloads = _payloads()
     payloads[STATION_STATUS_URL]["data"]["stations"][0]["station_id"] = "unknown"
-
-    def fake_fetcher(url: str, timeout_seconds: float) -> dict:
-        return payloads[url]
 
     with pytest.raises(GbfsTransformError, match="missing from"):
         ingest_gbfs_station_feeds(
             DISCOVERY_URL,
             timeout_seconds=10.0,
-            session=session,
-            json_fetcher=fake_fetcher,
+            object_store=store,
+            json_fetcher=_fetcher_for(payloads),
         )
 
-    run = session.scalars(select(IngestionRun)).one()
-    assert run.status == IngestionRunStatus.FAILURE
-    assert run.system_id == "bike_share_toronto"
+    assert store.list_keys("") == []
+
+
+def test_an_empty_status_feed_is_a_failure_not_an_empty_snapshot(
+    store: LocalObjectStore,
+) -> None:
+    """A feed that lists no stations is an upstream fault. Staging an empty
+    snapshot would later read as a real observation of an empty system."""
+
+    payloads = _payloads()
+    payloads[STATION_STATUS_URL]["data"]["stations"] = []
+
+    with pytest.raises(GbfsTransformError, match="no rows"):
+        ingest_gbfs_station_feeds(
+            DISCOVERY_URL,
+            timeout_seconds=10.0,
+            object_store=store,
+            json_fetcher=_fetcher_for(payloads),
+        )
+
+    assert store.list_keys("") == []
+
+
+class _BrokenStore:
+    """A store whose every write fails, as an unreachable bucket would."""
+
+    def put(self, key: str, data: bytes) -> None:
+        raise ObjectStoreError("bucket unreachable")
+
+    def get(self, key: str) -> bytes:
+        raise ObjectNotFoundError(key)
+
+    def exists(self, key: str) -> bool:
+        return False
+
+    def list_keys(self, prefix: str) -> list[str]:
+        return []
+
+    def delete(self, key: str) -> None:
+        return None
+
+
+def test_a_store_outage_fails_the_cycle() -> None:
+    """Object storage is the only sink, so an outage there is the run
+    failing, not a shadow write to shrug off."""
+
+    with pytest.raises(ObjectStoreError, match="bucket unreachable"):
+        ingest_gbfs_station_feeds(
+            DISCOVERY_URL,
+            timeout_seconds=10.0,
+            object_store=_BrokenStore(),
+            json_fetcher=_fetcher_for(_payloads()),
+        )
